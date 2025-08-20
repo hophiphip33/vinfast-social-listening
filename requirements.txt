@@ -1,0 +1,10 @@
+flask
+flask-cors
+sqlalchemy
+pandas
+python-dotenv
+requests
+google-api-python-client
+transformers
+torch
+underthesea
