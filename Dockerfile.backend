@@ -1,0 +1,66 @@
+# Dockerfile for VinFast Social Listening Backend
+FROM python:3.9-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    wget \
+    git \
+    chromium \
+    chromium-driver \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Download Vietnamese language models and data
+RUN python -c "
+import nltk
+nltk.download('punkt')
+nltk.download('stopwords')
+"
+
+# Install Vietnamese NLP dependencies
+RUN python -c "
+import underthesea
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+print('Downloading Vietnamese models...')
+try:
+    tokenizer = AutoTokenizer.from_pretrained('wonrax/phobert-base-vietnamese-sentiment')
+    model = AutoModelForSequenceClassification.from_pretrained('wonrax/phobert-base-vietnamese-sentiment')
+    print('Models downloaded successfully')
+except Exception as e:
+    print(f'Error downloading models: {e}')
+"
+
+# Create necessary directories
+RUN mkdir -p /app/logs /app/ml-models /app/data
+
+# Copy application code
+COPY backend/ ./backend/
+COPY config/ ./config/
+
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+
+# Create non-root user
+RUN useradd --create-home --shell /bin/bash app && \
+    chown -R app:app /app
+USER app
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Expose port
+EXPOSE 8000
+
+# Default command
+CMD ["python", "-m", "uvicorn", "backend.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

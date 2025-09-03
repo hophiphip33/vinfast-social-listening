@@ -1,0 +1,217 @@
+version: '3.8'
+
+# Production Docker Compose Configuration
+# Optimized for production deployment with security and performance
+
+services:
+  # MongoDB with authentication and SSL
+  mongodb:
+    image: mongo:7.0
+    container_name: vinfast-mongodb-prod
+    restart: always
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+      MONGO_INITDB_DATABASE: vinfast_social_listening
+    volumes:
+      - mongodb_prod_data:/data/db
+      - ./config/mongod.conf:/etc/mongod.conf:ro
+      - ./config/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    ports:
+      - "27017:27017"
+    networks:
+      - vinfast-prod-network
+    command: ["mongod", "--config", "/etc/mongod.conf"]
+
+  # Redis with persistence
+  redis:
+    image: redis:7-alpine
+    container_name: vinfast-redis-prod
+    restart: always
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_prod_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - vinfast-prod-network
+
+  # Backend API (Production)
+  backend:
+    image: ${DOCKER_REGISTRY}/vinfast-backend:${IMAGE_TAG}
+    container_name: vinfast-backend-prod
+    restart: always
+    environment:
+      MONGODB_URL: mongodb://${MONGO_ROOT_USERNAME}:${MONGO_ROOT_PASSWORD}@mongodb:27017/vinfast_social_listening?authSource=admin
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      SECRET_KEY: ${SECRET_KEY}
+      LOG_LEVEL: WARNING
+      ENVIRONMENT: production
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mongodb
+      - redis
+    volumes:
+      - ./logs:/app/logs
+      - ./ml-models:/app/ml-models
+    networks:
+      - vinfast-prod-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+
+  # Frontend (Production)
+  frontend:
+    image: ${DOCKER_REGISTRY}/vinfast-frontend:${IMAGE_TAG}
+    container_name: vinfast-frontend-prod
+    restart: always
+    environment:
+      REACT_APP_API_URL: ${FRONTEND_API_URL}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - vinfast-prod-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+
+  # Celery Worker
+  worker:
+    image: ${DOCKER_REGISTRY}/vinfast-backend:${IMAGE_TAG}
+    container_name: vinfast-worker-prod
+    restart: always
+    environment:
+      MONGODB_URL: mongodb://${MONGO_ROOT_USERNAME}:${MONGO_ROOT_PASSWORD}@mongodb:27017/vinfast_social_listening?authSource=admin
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      WORKER_MODE: true
+      LOG_LEVEL: INFO
+    depends_on:
+      - mongodb
+      - redis
+    volumes:
+      - ./logs:/app/logs
+      - ./ml-models:/app/ml-models
+    networks:
+      - vinfast-prod-network
+    command: ["celery", "-A", "backend.tasks.worker", "worker", "--loglevel=info", "--concurrency=2"]
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
+
+  # Task Scheduler
+  scheduler:
+    image: ${DOCKER_REGISTRY}/vinfast-backend:${IMAGE_TAG}
+    container_name: vinfast-scheduler-prod
+    restart: always
+    environment:
+      MONGODB_URL: mongodb://${MONGO_ROOT_USERNAME}:${MONGO_ROOT_PASSWORD}@mongodb:27017/vinfast_social_listening?authSource=admin
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      SCHEDULER_MODE: true
+      LOG_LEVEL: INFO
+    depends_on:
+      - mongodb
+      - redis
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - vinfast-prod-network
+    command: ["python", "-m", "backend.tasks.scheduler"]
+
+  # Nginx Load Balancer
+  nginx:
+    image: nginx:alpine
+    container_name: vinfast-nginx-prod
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./config/ssl:/etc/nginx/ssl:ro
+      - ./logs/nginx:/var/log/nginx
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - vinfast-prod-network
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Monitoring: Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: vinfast-prometheus
+    restart: always
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - vinfast-prod-network
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+
+  # Monitoring: Grafana
+  grafana:
+    image: grafana/grafana:latest
+    container_name: vinfast-grafana
+    restart: always
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./config/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    networks:
+      - vinfast-prod-network
+
+volumes:
+  mongodb_prod_data:
+    driver: local
+  redis_prod_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  vinfast-prod-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

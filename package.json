@@ -1,0 +1,29 @@
+{
+  "name": "vinfast-social-listening",
+  "version": "1.0.0",
+  "description": "VinFast Social Listening Platform - Graduation Project",
+  "main": "index.js",
+  "scripts": {
+    "dev": "concurrently \"npm run backend\" \"npm run frontend\"",
+    "backend": "cd backend && python -m uvicorn api.main:app --reload --host 0.0.0.0 --port 8000",
+    "frontend": "cd frontend && npm start",
+    "install-all": "npm install && cd frontend && npm install && cd ../backend && pip install -r ../requirements.txt",
+    "build": "cd frontend && npm run build",
+    "test": "cd backend && pytest",
+    "docker:build": "docker-compose build",
+    "docker:up": "docker-compose up -d",
+    "docker:down": "docker-compose down"
+  },
+  "keywords": [
+    "social-listening",
+    "sentiment-analysis",
+    "vietnamese-nlp",
+    "vinfast",
+    "data-analysis"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

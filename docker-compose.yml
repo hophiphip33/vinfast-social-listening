@@ -1,0 +1,147 @@
+version: '3.8'
+
+services:
+  # MongoDB Database
+  mongodb:
+    image: mongo:7.0
+    container_name: vinfast-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: vinfast123
+      MONGO_INITDB_DATABASE: vinfast_social_listening
+    volumes:
+      - mongodb_data:/data/db
+      - ./config/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    ports:
+      - "27017:27017"
+    networks:
+      - vinfast-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: vinfast-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - vinfast-network
+
+  # Backend API
+  backend:
+    build: 
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: vinfast-backend
+    restart: unless-stopped
+    environment:
+      MONGODB_URL: mongodb://admin:vinfast123@mongodb:27017/vinfast_social_listening?authSource=admin
+      REDIS_URL: redis://redis:6379
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      LOG_LEVEL: INFO
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mongodb
+      - redis
+    volumes:
+      - ./logs:/app/logs
+      - ./ml-models:/app/ml-models
+    networks:
+      - vinfast-network
+    command: >
+      sh -c "python -m uvicorn backend.api.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  # Frontend Dashboard
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: vinfast-frontend
+    restart: unless-stopped
+    environment:
+      REACT_APP_API_URL: http://localhost:8000
+      GENERATE_SOURCEMAP: false
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - vinfast-network
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: vinfast-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./config/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - vinfast-network
+
+  # Background Task Worker (Celery)
+  worker:
+    build: 
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: vinfast-worker
+    restart: unless-stopped
+    environment:
+      MONGODB_URL: mongodb://admin:vinfast123@mongodb:27017/vinfast_social_listening?authSource=admin
+      REDIS_URL: redis://redis:6379
+      WORKER_MODE: true
+    depends_on:
+      - mongodb
+      - redis
+    volumes:
+      - ./logs:/app/logs
+      - ./ml-models:/app/ml-models
+    networks:
+      - vinfast-network
+    command: >
+      sh -c "celery -A backend.tasks.worker worker --loglevel=info --concurrency=2"
+
+  # Scheduler for automatic data collection
+  scheduler:
+    build: 
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: vinfast-scheduler
+    restart: unless-stopped
+    environment:
+      MONGODB_URL: mongodb://admin:vinfast123@mongodb:27017/vinfast_social_listening?authSource=admin
+      REDIS_URL: redis://redis:6379
+      SCHEDULER_MODE: true
+    depends_on:
+      - mongodb
+      - redis
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - vinfast-network
+    command: >
+      sh -c "python -m backend.tasks.scheduler"
+
+volumes:
+  mongodb_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  vinfast-network:
+    driver: bridge
