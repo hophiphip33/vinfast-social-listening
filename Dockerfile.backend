@@ -19,25 +19,13 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Download Vietnamese language models and data
-RUN python -c "
-import nltk
-nltk.download('punkt')
-nltk.download('stopwords')
-"
+# Download Vietnamese language models and data (NLTK)
+RUN python -c "import nltk; nltk.download('punkt'); nltk.download('stopwords')"
 
-# Install Vietnamese NLP dependencies
-RUN python -c "
-import underthesea
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-print('Downloading Vietnamese models...')
-try:
-    tokenizer = AutoTokenizer.from_pretrained('wonrax/phobert-base-vietnamese-sentiment')
-    model = AutoModelForSequenceClassification.from_pretrained('wonrax/phobert-base-vietnamese-sentiment')
-    print('Models downloaded successfully')
-except Exception as e:
-    print(f'Error downloading models: {e}')
-"
+# Download PhoBERT model (optional, heavy step)
+RUN python -c "from transformers import AutoTokenizer, AutoModelForSequenceClassification; \
+    AutoTokenizer.from_pretrained('wonrax/phobert-base-vietnamese-sentiment'); \
+    AutoModelForSequenceClassification.from_pretrained('wonrax/phobert-base-vietnamese-sentiment')"
 
 # Create necessary directories
 RUN mkdir -p /app/logs /app/ml-models /app/data

@@ -6,14 +6,15 @@ Collects news articles about VinFast from Vietnamese news websites
 import asyncio
 import aiohttp
 from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
+from datetime import datetime
 from bs4 import BeautifulSoup
 from newspaper import Article
 import feedparser
 from loguru import logger
 
-from backend.database.connection import DatabaseOperations
+from backend.database.connection import DatabaseOperations, db_manager
 from backend.config.settings import settings
+
 
 class NewsCollector:
     """Collects news articles about VinFast from Vietnamese news sources"""
@@ -103,7 +104,6 @@ class NewsCollector:
                 soup = BeautifulSoup(html, 'html.parser')
                 
                 articles = []
-                # This will need to be customized for each news site's HTML structure
                 article_links = self._extract_article_links(soup, source)
                 
                 for link in article_links[:10]:  # Limit to 10 articles per source
@@ -136,7 +136,6 @@ class NewsCollector:
         """Extract article links from search results (customize per news site)"""
         links = []
         
-        # Generic link extraction - customize for each news site
         for link_tag in soup.find_all('a', href=True):
             href = link_tag['href']
             if href.startswith('/'):
@@ -173,7 +172,7 @@ class NewsCollector:
                 "author": ", ".join(article.authors) if article.authors else None,
                 "published_at": article.publish_date or datetime.now(),
                 "collected_at": datetime.now(),
-                "likes_count": 0,  # News articles don't have likes
+                "likes_count": 0,
                 "shares_count": 0,
                 "comments_count": 0,
                 "views_count": 0,
@@ -194,10 +193,7 @@ class NewsCollector:
         
         for source in self.news_sources:
             try:
-                # Collect from RSS feed
                 rss_articles = await self.collect_from_rss(source)
-                
-                # Collect from search results
                 search_articles = await self.collect_from_search(source)
                 
                 all_articles = rss_articles + search_articles
@@ -214,6 +210,10 @@ class NewsCollector:
                 saved_count = 0
                 for article in unique_articles:
                     try:
+                        if db_manager.database is None:
+                            logger.error("Database is not connected, cannot save article")
+                            continue
+                        
                         await self.db_ops.insert_post(article)
                         saved_count += 1
                     except Exception as e:
@@ -223,9 +223,7 @@ class NewsCollector:
                 total_collected += saved_count
                 
                 logger.info(f"Saved {saved_count} new articles from {source['name']}")
-                
-                # Delay between sources
-                await asyncio.sleep(2)
+                await asyncio.sleep(2)  # Delay between sources
                 
             except Exception as e:
                 logger.error(f"Error collecting from {source['name']}: {e}")
@@ -234,11 +232,10 @@ class NewsCollector:
         logger.info(f"Total news articles collected: {total_collected}")
         return {"total": total_collected, "sources": source_stats}
 
+
 # Usage example
 async def main():
     """Example usage"""
-    from backend.database.connection import db_manager
-    
     await db_manager.connect()
     
     async with NewsCollector() as collector:
@@ -246,6 +243,7 @@ async def main():
         print(f"Collection completed: {stats}")
     
     await db_manager.disconnect()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -504,3 +504,6 @@ if __name__ == "__main__":
         reload=True,
         log_level=settings.log_level.lower()
     )
+@app.get("/api/system/status")
+async def get_system_status():
+    ...

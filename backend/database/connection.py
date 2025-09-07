@@ -1,7 +1,7 @@
 """
 Database connection and operations for VinFast Social Listening Platform
 """
-
+from bson import ObjectId
 import asyncio
 from typing import Optional, List, Dict, Any
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
@@ -64,7 +64,7 @@ class DatabaseManager:
     
     def get_collection(self, collection_name: str):
         """Get a collection from the database"""
-        if not self.database:
+        if self.database is None:
             raise RuntimeError("Database not connected")
         return self.database[collection_name]
 
