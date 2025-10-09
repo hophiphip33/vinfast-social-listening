@@ -154,23 +154,32 @@ class NewsCollector:
         return any(indicator in url for indicator in article_indicators)
     
     async def _extract_article_details(self, url: str, source: Dict[str, str]) -> Optional[Dict[str, Any]]:
-        """Extract full article content from URL"""
+        """Extract full article content from URL (async-safe)"""
         try:
-            article = Article(url, language='vi')
-            article.download()
-            article.parse()
+            # Dùng aiohttp thay vì newspaper3k để tránh blocking
+            async with self.session.get(url) as response:
+                if response.status != 200:
+                    logger.warning(f"Failed to fetch article: {url}")
+                    return None
+                html = await response.text()
+
+            # Phân tích nội dung bằng BeautifulSoup
+            soup = BeautifulSoup(html, "html.parser")
             
-            if not self._is_vinfast_related(article.title + " " + article.text):
+            title = soup.find("title").get_text(strip=True) if soup.find("title") else None
+            content = " ".join(p.get_text(strip=True) for p in soup.find_all("p"))
+            
+            if not title or not self._is_vinfast_related(title + " " + content):
                 return None
-            
+
             return {
                 "platform": "news",
                 "source_url": url,
                 "source_name": source["name"],
-                "title": article.title,
-                "content": article.text,
-                "author": ", ".join(article.authors) if article.authors else None,
-                "published_at": article.publish_date or datetime.now(),
+                "title": title,
+                "content": content,
+                "author": None,  # có thể bổ sung nếu tìm được trong meta
+                "published_at": datetime.now(),  # fallback
                 "collected_at": datetime.now(),
                 "likes_count": 0,
                 "shares_count": 0,
@@ -179,10 +188,11 @@ class NewsCollector:
                 "language": "vi",
                 "is_processed": False
             }
-            
+
         except Exception as e:
             logger.error(f"Error extracting article from {url}: {e}")
             return None
+
     
     async def collect_all_news(self) -> Dict[str, int]:
         """Collect news from all sources"""

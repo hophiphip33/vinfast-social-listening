@@ -75,16 +75,31 @@ class DatabaseOperations:
     """Database operations for the application"""
     
     @staticmethod
-    async def insert_post(post_data: Dict[str, Any]) -> str:
-        """Insert a new post"""
+    async def insert_post(post_data: Dict[str, Any]) -> Optional[str]:
+        """
+        Insert a new post.
+        - Nếu source_url đã tồn tại thì bỏ qua (không báo lỗi).
+        - Nếu insert thành công thì trả về ID.
+        """
         try:
             collection = db_manager.get_collection("posts")
-            result = await collection.insert_one(post_data)
-            logger.debug(f"Inserted post with ID: {result.inserted_id}")
-            return str(result.inserted_id)
+            result = await collection.update_one(
+                {"source_url": post_data["source_url"]},  # Điều kiện kiểm tra trùng
+                {"$setOnInsert": post_data},              # Chỉ insert nếu chưa tồn tại
+                upsert=True
+            )
+
+            if result.upserted_id:  # Nếu là insert mới
+                logger.debug(f"Inserted new post with ID: {result.upserted_id}")
+                return str(result.upserted_id)
+            else:
+                logger.debug(f"Skipped duplicate post: {post_data.get('title', 'N/A')}")
+                return None
+
         except Exception as e:
             logger.error(f"Error inserting post: {e}")
-            raise
+            return None
+
     
     @staticmethod
     async def insert_comment(comment_data: Dict[str, Any]) -> str:
