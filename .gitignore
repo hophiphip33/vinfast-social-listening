@@ -1,0 +1,11 @@
+# Compiled Python files
+*.pyc
+__pycache__/
+
+# Sensitive/Local files and temporary data
+backend/collectors/cookies.json
+backend/config/facebook_cookies_parsed.txt
+backend/config/facebook_cookies.txt
+models/
+*.json
+backend/collectors/subtitle.vtt.vi.vtt

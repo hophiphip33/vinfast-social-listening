@@ -1,186 +1,309 @@
+# backend/collectors/facebook_scraper.py
 """
-Facebook Public Data Collector for VinFast Social Listening Platform
+Facebook Scraper - MIỄN PHÍ
+Sử dụng: facebook-scraper library (unofficial but works)
+Lấy: Posts, Comments, Reactions từ PUBLIC pages
 """
 
-import asyncio
-from typing import List, Dict, Any, Optional
-from datetime import datetime
-import aiohttp
-from facebook_scraper import get_posts
-from loguru import logger
+try:
+    from facebook_scraper import get_posts, get_profile
+except ImportError:
+    print("⚠️  Please install: pip install facebook-scraper")
 
-from backend.database.connection import DatabaseOperations
-from backend.config.settings import settings
+from datetime import datetime, timedelta
+from typing import List, Dict
+import time
+import random
 
-
-class FacebookCollector:
-    """Collects public Facebook posts and comments about VinFast"""
-
-    def __init__(self):
-        self.db_ops = DatabaseOperations()
-        self.session: Optional[aiohttp.ClientSession] = None
-
-        # Các từ khóa liên quan VinFast
-        self.vinfast_keywords = [
-            "vinfast", "vin fast", "xe vinfast", "ô tô vinfast",
-            "xe điện vinfast", "vingroup", "phạm nhật vượng",
-            "vf8", "vf9", "vf5", "fadil", "lux a2.0", "lux sa2.0",
-            "oto vinfast", "vinfast vietnam"
+class FacebookScraper:
+    """
+    Scraper miễn phí cho Facebook PUBLIC pages
+    - Không cần API key
+    - Không cần đăng nhập (cho public pages)
+    - Lấy được: posts, likes, shares, comments
+    """
+    
+    def __init__(self, cookies_file=None):
+        """
+        cookies_file: Optional - file cookies.txt để tránh rate limit
+        Để lấy cookies:
+        1. Đăng nhập Facebook trên Chrome
+        2. Cài extension "Get cookies.txt LOCALLY"
+        3. Export cookies và lưu vào file
+        """
+        self.cookies_file = cookies_file
+        self.delay_range = (2, 5)  # Delay giữa các requests để tránh block
+    
+    def search_public_pages(self, keywords: List[str]) -> List[Dict]:
+        """
+        Tìm các Facebook pages công khai liên quan đến keywords
+        Note: Cần manual vì Facebook không cho search tự động
+        """
+        # Danh sách pages VinFast phổ biến (có thể mở rộng)
+        vinfast_pages = [
+            "VinFastAuto.Official",           # VinFast official
+            "VinFastVietNam",        # VinFast Vietnam
+            "VinFast.Owners",        # VinFast Owners Group (nếu public)
+            "Otofun.Community",                # Oto.com.vn
+            "xehay.vn",              # Xe Hay
+            "autodaily.vn",          # Auto Daily
+            "carpassion.vn"          # Car Passion
         ]
-
-        # Các page công khai cần theo dõi
-        self.target_pages = [
-            "VinFastAuto.Official",
-            "VinFastGlobal",
-            "VinGroupOfficial",
-            "otosaigon",
-            "xehay.vn",
-            "autodaily.vn",
-        ]
-
-    async def __aenter__(self):
-        """Khởi tạo session HTTP (cho các request phụ nếu cần)"""
-        self.session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=60),
-            headers={"User-Agent": "Mozilla/5.0"}
-        )
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Đóng session HTTP"""
-        if self.session:
-            await self.session.close()
-
-    def _is_vinfast_related(self, text: str) -> bool:
-        """Check nếu nội dung có chứa từ khóa VinFast"""
-        if not text:
-            return False
-        return any(keyword in text.lower() for keyword in self.vinfast_keywords)
-
-    def _extract_engagement_metrics(self, post_data: Dict[str, Any]) -> Dict[str, int]:
-        """Lấy số like, share, comment từ post"""
-        return {
-            "likes_count": post_data.get("likes") or 0,
-            "shares_count": post_data.get("shares") or 0,
-            "comments_count": post_data.get("comments") or 0,
-            "views_count": 0  # Không có trong free API
-        }
-
-    async def collect_from_page(self, page_name: str, max_posts: int = 20) -> List[Dict[str, Any]]:
-        """Lấy dữ liệu post từ 1 fanpage"""
-        collected_posts = []
-
+        
+        return [{"page_id": page, "name": page} for page in vinfast_pages]
+    
+    def get_page_posts(
+        self, 
+        page_id: str, 
+        keywords: List[str] = None,
+        days_back: int = 14, 
+        max_posts: int = 50
+    ) -> List[Dict]:
+        """
+        Lấy posts từ một Facebook page công khai
+        """
+        posts_data = []
+        cutoff_date = datetime.now() - timedelta(days=days_back)
+        
         try:
-            logger.info(f"Collecting posts from Facebook page: {page_name}")
-
+            print(f"  → Scraping page: {page_id}")
+            
+            # Lấy posts từ page
             posts = get_posts(
-                account=page_name,
-                pages=max_posts // 10,  # facebook-scraper: mỗi page ~10 post
-                extra_info=True,
-                
-                cookies="backend/config/facebook_cookies.txt"
+                account=page_id,
+                pages=max_posts,
+                cookies=self.cookies_file,
+                options={
+                    "comments": True,      # Lấy comments
+                    "reactors": True,      # Lấy reactions
+                    "progress": False
+                }
             )
-
+            
             for post in posts:
-                post_text = (post.get("text") or "") + " " + (post.get("post_text") or "")
-
-                # Bỏ qua nếu không liên quan VinFast
-                #  continue
-
-                engagement = self._extract_engagement_metrics(post)
-
+                # Kiểm tra ngày đăng
+                post_time = post.get("time")
+                if post_time and post_time < cutoff_date:
+                    break
+                
+                # Lấy text content
+                text = post.get("text", "") or post.get("post_text", "")
+                
+                # Filter theo keywords nếu có
+                if keywords:
+                    text_lower = text.lower()
+                    if not any(kw.lower() in text_lower for kw in keywords):
+                        continue
+                
+                # Lấy comments
+                comments_list = []
+                comments_full = post.get("comments_full", []) or []
+                for comment in comments_full[:100]:  # Giới hạn 100 comments đầu
+                    comments_list.append({
+                        "comment_id": comment.get("comment_id"),
+                        "author": comment.get("commenter_name"),
+                        "text": comment.get("comment_text", ""),
+                        "likes": comment.get("comment_reaction_count", 0),
+                        "time": comment.get("comment_time")
+                    })
+                
+                # Lấy reactions (likes, love, haha, etc.)
+                reactions = post.get("reactions", {}) or {}
+                
                 post_data = {
-                    "platform": "facebook",
-                    "source_url": post.get("post_url"),
-                    "source_name": page_name,
-                    "title": None,
-                    "content": post_text.strip(),
-                    "author": page_name,
-                    "published_at": post.get("time") or datetime.now(),
-                    "collected_at": datetime.now(),
-                    **engagement,
-                    "language": "vi",
-                    "is_processed": False,
+                    "post_id": post.get("post_id"),
+                    "url": post.get("post_url", ""),
+                    "author": page_id,
+                    "content": text,
+                    "published": post_time,
+                    "likes": reactions.get("like", 0),
+                    "love": reactions.get("love", 0),
+                    "haha": reactions.get("haha", 0),
+                    "wow": reactions.get("wow", 0),
+                    "sad": reactions.get("sad", 0),
+                    "angry": reactions.get("angry", 0),
+                    "total_reactions": sum(reactions.values()) if reactions else 0,
+                    "shares": post.get("shares", 0),
+                    "comments_count": post.get("comments", 0),
+                    "comments": comments_list,
+                    "image": post.get("image", ""),
+                    "video": post.get("video", "")
                 }
-
-                try:
-                    # Lưu post vào DB và lấy id
-                    post_id = await self.db_ops.insert_post(post_data)
-                    post_data["_id"] = post_id
-                    collected_posts.append(post_data)
-
-                    # Nếu có comment thì lưu
-                    if post.get("comments_full"):
-                        await self._collect_comments(post, post_id)
-
-                except Exception as e:
-                    logger.warning(f"Error saving post from {page_name}: {e}")
-
-                await asyncio.sleep(settings.social_crawl_delay)
-
-            logger.info(f"Collected {len(collected_posts)} VinFast-related posts from {page_name}")
-            return collected_posts
-
+                
+                posts_data.append(post_data)
+                
+                # Delay để tránh bị block
+                time.sleep(random.uniform(*self.delay_range))
+                
         except Exception as e:
-            logger.error(f"Error collecting from Facebook page {page_name}: {e}")
-            return []
-
-    async def _collect_comments(self, post: Dict[str, Any], post_id: str):
-        """Lưu comment của 1 post"""
-        try:
-            for comment in post.get("comments_full", []):
-                comment_text = comment.get("comment_text", "")
-                if not comment_text.strip():
-                    continue
-
-                comment_data = {
-                    "post_id": post_id,
-                    "content": comment_text,
-                    "author": comment.get("commenter_name"),
-                    "likes_count": comment.get("comment_reaction_count") or 0,
-                    "replies_count": len(comment.get("replies", [])),
-                    "published_at": comment.get("comment_time") or datetime.now(),
-                    "collected_at": datetime.now(),
-                    "language": "vi",
-                    "is_processed": False
-                }
-
-                try:
-                    await self.db_ops.insert_comment(comment_data)
-                except Exception as e:
-                    logger.warning(f"Error saving comment: {e}")
-
-        except Exception as e:
-            logger.error(f"Error collecting comments: {e}")
-
-    async def collect_all_facebook_data(self) -> Dict[str, Any]:
-        """Collect từ tất cả fanpage trong danh sách"""
+            print(f"  ⚠️  Error scraping {page_id}: {e}")
+        
+        return posts_data
+    
+    def search_posts_by_keywords(
+        self, 
+        keywords: List[str], 
+        days_back: int = 14,
+        max_posts_per_page: int = 30
+    ) -> List[Dict]:
+        """
+        Main method: Lấy tất cả posts từ các pages liên quan
+        """
         all_posts = []
-        stats = {"pages": {}, "total_posts": 0}
+        pages = self.search_public_pages(keywords)
+        
+        print(f"\n🔍 Searching {len(pages)} Facebook pages...")
+        
+        for page in pages:
+            try:
+                posts = self.get_page_posts(
+                    page["page_id"], 
+                    keywords=keywords,
+                    days_back=days_back, 
+                    max_posts=max_posts_per_page
+                )
+                all_posts.extend(posts)
+                print(f"  ✓ Found {len(posts)} posts from {page['page_id']}")
+                
+                # Delay giữa các pages
+                time.sleep(random.uniform(3, 6))
+                
+            except Exception as e:
+                print(f"  ✗ Failed to scrape {page['page_id']}: {e}")
+                continue
+        
+        return all_posts
 
-        logger.info("Starting Facebook data collection...")
 
-        for page_name in self.target_pages:
-            posts = await self.collect_from_page(page_name, settings.max_posts_per_batch)
-            all_posts.extend(posts)
-            stats["pages"][page_name] = len(posts)
-
-        stats["total_posts"] = len(all_posts)
-        logger.info(f"Facebook collection completed. Total posts: {stats['total_posts']}")
-        return stats
-
-
-# Usage example
-async def main():
-    from backend.database.connection import db_manager
-    await db_manager.connect()
-
-    async with FacebookCollector() as collector:
-        stats = await collector.collect_all_facebook_data()
-        print(stats)
-
-    await db_manager.disconnect()
-
+class FacebookGroupScraper:
+    """
+    Scraper cho Facebook PUBLIC Groups
+    """
+    
+    def __init__(self, cookies_file=None):
+        self.cookies_file = cookies_file
+    
+    def get_group_posts(
+        self, 
+        group_id: str, 
+        keywords: List[str] = None,
+        days_back: int = 14,
+        max_posts: int = 50
+    ) -> List[Dict]:
+        """
+        Lấy posts từ PUBLIC Facebook group
+        group_id: ID hoặc username của group
+        """
+        posts_data = []
+        cutoff_date = datetime.now() - timedelta(days=days_back)
+        
+        try:
+            print(f"  → Scraping group: {group_id}")
+            
+            posts = get_posts(
+                group=group_id,  # Sử dụng 'group' thay vì 'account'
+                pages=max_posts,
+                cookies=self.cookies_file,
+                options={
+                    "comments": True,
+                    "reactors": True,
+                    "progress": False
+                }
+            )
+            
+            for post in posts:
+                post_time = post.get("time")
+                if post_time and post_time < cutoff_date:
+                    break
+                
+                text = post.get("text", "") or post.get("post_text", "")
+                
+                # Filter theo keywords
+                if keywords:
+                    text_lower = text.lower()
+                    if not any(kw.lower() in text_lower for kw in keywords):
+                        continue
+                
+                # Lấy comments
+                comments_list = []
+                for comment in (post.get("comments_full") or [])[:100]:
+                    comments_list.append({
+                        "comment_id": comment.get("comment_id"),
+                        "author": comment.get("commenter_name"),
+                        "text": comment.get("comment_text", ""),
+                        "likes": comment.get("comment_reaction_count", 0)
+                    })
+                
+                reactions = post.get("reactions", {}) or {}
+                
+                post_data = {
+                    "post_id": post.get("post_id"),
+                    "url": post.get("post_url", ""),
+                    "author": post.get("username", "Unknown"),
+                    "content": text,
+                    "published": post_time,
+                    "total_reactions": sum(reactions.values()) if reactions else 0,
+                    "shares": post.get("shares", 0),
+                    "comments_count": post.get("comments", 0),
+                    "comments": comments_list
+                }
+                
+                posts_data.append(post_data)
+                time.sleep(random.uniform(2, 4))
+                
+        except Exception as e:
+            print(f"  ⚠️  Error scraping group {group_id}: {e}")
+        
+        return posts_data
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    print("🚀 Đang chạy thử FacebookScraper...\n")
+
+    scraper = FacebookScraper()
+    keywords = ["VinFast", "VF8", "xe điện"]
+    
+    posts = scraper.search_posts_by_keywords(
+        keywords=keywords,
+        days_back=2,
+        max_posts_per_page=1
+    )
+
+    print(f"\n✅ Tổng số bài viết lấy được: {len(posts)}")
+    if posts:
+        print("📄 Bài viết mẫu:")
+        print(posts[0])
+    else:
+        print("⚠️ Không tìm thấy bài viết nào.")
+
+# HƯỚNG DẪN SỬ DỤNG:
+"""
+# 1. Cài đặt thư viện
+pip install facebook-scraper
+
+# 2. Không cần cookies (cho public pages)
+from collectors.facebook_scraper import FacebookScraper
+
+scraper = FacebookScraper()
+keywords = ["VinFast", "VF8", "xe điện"]
+posts = scraper.search_posts_by_keywords(keywords, days_back=14)
+
+# 3. Có cookies (tốt hơn, tránh rate limit)
+scraper = FacebookScraper(cookies_file="facebook_cookies.txt")
+posts = scraper.search_posts_by_keywords(keywords, days_back=14)
+
+# 4. Scrape group công khai
+from collectors.facebook_scraper import FacebookGroupScraper
+
+group_scraper = FacebookGroupScraper(cookies_file="facebook_cookies.txt")
+posts = group_scraper.get_group_posts(
+    group_id="VinFastOwnersVietnam",  # Ví dụ
+    keywords=["VF8", "lỗi"],
+    days_back=7
+)
+
+# 5. Kết quả bao gồm:
+# - Post content, reactions (like, love, haha, sad, angry)
+# - Comments với author và likes
+# - Shares count
+# - URL, images, videos
+"""
