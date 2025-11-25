@@ -28,7 +28,7 @@ class SocialMediaPost(BaseModel):
     id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
     
     # Source information
-    platform: str  # "facebook", "tiktok", "news"
+    platform: str  # "", "youtube", "news"
     source_url: Optional[str] = None
     source_name: Optional[str] = None
     

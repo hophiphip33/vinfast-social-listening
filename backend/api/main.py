@@ -14,8 +14,6 @@ from contextlib import asynccontextmanager
 from backend.config.settings import settings
 from backend.database.connection import db_manager, DatabaseOperations
 from backend.collectors.news_collector import NewsCollector
-from backend.collectors.facebook_collector import FacebookCollector
-from backend.collectors.tiktok_collector import TikTokCollector
 from backend.processors.data_processor import data_processor
 from backend.processors.vietnamese_sentiment import sentiment_analyzer
 from backend.analytics.insights_engine import insights_engine
@@ -88,43 +86,7 @@ async def collect_news_data(background_tasks: BackgroundTasks):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error starting news collection: {str(e)}")
 
-@app.post("/api/collect/facebook")
-async def collect_facebook_data(background_tasks: BackgroundTasks):
-    """Trigger Facebook data collection"""
-    try:
-        async def collect_facebook():
-            async with FacebookCollector() as collector:
-                stats = await collector.collect_all_facebook_data()
-                logger.info(f"Facebook collection completed: {stats}")
-        
-        background_tasks.add_task(collect_facebook)
-        
-        return {
-            "message": "Bắt đầu thu thập dữ liệu Facebook về VinFast",
-            "status": "started",
-            "estimated_duration": "3-7 phút"
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error starting Facebook collection: {str(e)}")
 
-@app.post("/api/collect/tiktok")
-async def collect_tiktok_data(background_tasks: BackgroundTasks):
-    """Trigger TikTok data collection"""
-    try:
-        async def collect_tiktok():
-            async with TikTokCollector() as collector:
-                stats = await collector.collect_all_tiktok_data()
-                logger.info(f"TikTok collection completed: {stats}")
-        
-        background_tasks.add_task(collect_tiktok)
-        
-        return {
-            "message": "Bắt đầu thu thập dữ liệu TikTok về VinFast",
-            "status": "started",
-            "estimated_duration": "5-10 phút"
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error starting TikTok collection: {str(e)}")
 
 @app.post("/api/collect/all")
 async def collect_all_data(background_tasks: BackgroundTasks):
@@ -135,16 +97,12 @@ async def collect_all_data(background_tasks: BackgroundTasks):
             async with NewsCollector() as news_collector:
                 news_stats = await news_collector.collect_all_news()
             
-            async with FacebookCollector() as fb_collector:
-                fb_stats = await fb_collector.collect_all_facebook_data()
             
-            async with TikTokCollector() as tiktok_collector:
-                tiktok_stats = await tiktok_collector.collect_all_tiktok_data()
             
             # Process collected data
             processing_stats = await data_processor.process_unprocessed_data()
             
-            logger.info(f"Full collection completed - News: {news_stats}, FB: {fb_stats}, TikTok: {tiktok_stats}, Processing: {processing_stats}")
+            logger.info(f"Full collection completed - News: {news_stats}, Processing: {processing_stats}")
         
         background_tasks.add_task(collect_all)
         

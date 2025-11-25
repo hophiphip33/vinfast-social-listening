@@ -22,7 +22,8 @@ class Settings(BaseSettings):
     news_crawl_delay: int = 2
     social_crawl_delay: int = 5
     max_posts_per_batch: int = 100
-    
+    # --- CẢI TIẾN: THÊM API KEY CHO GEMINI ---
+    gemini_api_key: Optional[str] = "AIzaSyCWBJbGRgfSsHwhYDQSVDeVYP8ToolXTWw" # <--- ĐÃ ĐƯỢC THÊM
     # Sentiment Analysis
     model_name: str = "vinai/phobert-base"
     max_sequence_length: int = 256

@@ -195,6 +195,31 @@ class DatabaseOperations:
             logger.error(f"Error getting post by ID {post_id}: {e}")
             return None
     
+    # ... (Nội dung giữ nguyên cho đến trước hàm get_post_by_id)
+
+    @staticmethod
+    async def get_post_by_url(url: str) -> Optional[Dict[str, Any]]:
+        """
+        Tra cứu một bài viết (post/video) dựa trên source_url.
+        Sử dụng cho logic kiểm tra URL đã có chưa.
+        """
+        try:
+            collection = db_manager.get_collection("posts")
+            post = await collection.find_one({"source_url": url})
+            
+            if post:
+                # Chuyển ObjectId sang string để tiện xử lý ở tầng API/Logic
+                post["_id"] = str(post["_id"])
+                return post
+            return None
+        except Exception as e:
+            logger.error(f"Error getting post by URL {url}: {e}")
+            return None
+
+    @staticmethod
+    async def get_post_by_id(post_id: str) -> Optional[Dict[str, Any]]:
+        """Get a specific post by ID"""
+# ... (Phần còn lại của file connection.py giữ nguyên)
     @staticmethod
     async def save_analytics_result(analytics_data: Dict[str, Any]) -> str:
         """Save analytics results"""
