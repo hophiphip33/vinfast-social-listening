@@ -21,7 +21,7 @@ class SentimentAnalysisRequest(BaseModel):
 
 class CollectionRequest(BaseModel):
     """Request schema for data collection"""
-    source: str = Field(..., description="Data source: news, facebook, tiktok, or all")
+    source: str = Field(..., description="Data source: news, facebook")
     max_items: Optional[int] = Field(100, description="Maximum items to collect")
     
 class AnalyticsRequest(BaseModel):
@@ -30,7 +30,26 @@ class AnalyticsRequest(BaseModel):
     end_date: datetime = Field(..., description="End date for analysis")
     platforms: Optional[List[str]] = Field(None, description="Platforms to include")
 
+# --- [THÊM MỚI] SCHEMA CHO USER SETTINGS ---
+class UserSettingsUpdate(BaseModel):
+    """Request schema for updating user settings"""
+    brand_name: str
+    keywords: str
+    active_sources: Dict[str, bool] # Ví dụ: {"youtube": false, "news": true}
+
 # Response Schemas
+# --- [THÊM MỚI] SCHEMA TRẢ VỀ USER (CÓ ACTIVE SOURCES) ---
+class UserResponse(BaseModel):
+    """Response schema for User profile"""
+    id: str
+    email: str
+    username: str
+    role: str
+    is_active: bool
+    brand_name: Optional[str] = None
+    keywords: List[str] = []
+    active_sources: Dict[str, bool] = {"youtube": True, "news": True}
+
 class SentimentResult(BaseModel):
     """Sentiment analysis result"""
     sentiment: str = Field(..., description="Sentiment label: positive, negative, neutral")
@@ -165,3 +184,13 @@ class ValidationError(BaseModel):
     field: str
     message: str
     invalid_value: Any
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str
+    role: str
+    username: str

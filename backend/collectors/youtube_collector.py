@@ -1,6 +1,8 @@
 """
-YouTube Video Collector - Top 20 Most Viewed from Latest Videos
-Strategy: Tìm videos mới -> Fetch metadata -> Tính priority score -> Lấy top 20
+YouTube Video Collector - Dynamic Version
+- Target: Top 100 videos (30 days window) based on User Keywords
+- Comments: Top 30 per video
+- Performance: Optimized with ThreadPoolExecutor
 """
 
 import os
@@ -8,213 +10,196 @@ import sys
 import asyncio
 import requests
 import concurrent.futures
+import math
+import random  # [MỚI] Thêm thư viện random
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Tuple
+from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 
-# --- IMPORT CÁC MODULE DATABASE ---
+# --- 1. FIX LỖI IMPORT ---
+current_dir = os.path.dirname(os.path.abspath(__file__))
+root_dir = os.path.abspath(os.path.join(current_dir, "../../"))
+if root_dir not in sys.path:
+    sys.path.append(root_dir)
+
+# --- IMPORT MODULES ---
 from backend.database.connection import DatabaseOperations, db_manager 
-from backend.processors.vietnamese_sentiment import VietnameseSentimentAnalyzer
 from backend.config.settings import settings
+from backend.processors.custom_ai import CustomSentimentModel 
 
 from yt_dlp import YoutubeDL
-from youtube_transcript_api import YouTubeTranscriptApi
 from loguru import logger
 import google.generativeai as genai
 
-# --- CẤU HÌNH GEMINI ---
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyBagCvsURNXknATznFLl717toi7YJEE76M")
-if not GEMINI_API_KEY:
-    logger.warning("⚠️ GEMINI_API_KEY not found. Summarization will be skipped.")
-else:
-    genai.configure(api_key=GEMINI_API_KEY)
+# --- CẤU HÌNH GEMINI (MẶC ĐỊNH) ---
+# Biến global để lưu model hiện tại
+gemini_model = None
 
-gemini_model = genai.GenerativeModel('gemini-2.5-flash')
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+# Hàm khởi tạo Gemini mặc định (nếu không có key động)
+def init_default_gemini():
+    global gemini_model
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+    if not GEMINI_API_KEY:
+        if hasattr(settings, 'GEMINI_API_KEYS') and settings.GEMINI_API_KEYS:
+            GEMINI_API_KEY = settings.GEMINI_API_KEYS[0]
+    
+    if GEMINI_API_KEY:
+        try:
+            genai.configure(api_key=GEMINI_API_KEY)
+            gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+        except Exception as e:
+            logger.error(f"Lỗi cấu hình Gemini mặc định: {e}")
 
-VINGROUP_KEYWORDS = [
-    "vingroup", "phạm nhật vượng", "vinfast", "xe điện vinfast", 
-    "vinhomes", "vinpearl", "vinmec", "vf8", "vf9", "vf3","vinspeed",
-    "vinbus", "vincom","vinspace"
-]
+# Gọi khởi tạo lần đầu
+init_default_gemini()
+
+# Tối ưu hóa luồng xử lý
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=6)
 
 # ==============================================================================
-# 1. CÁC HÀM HỖ TRỢ (HELPER FUNCTIONS)
+# 2. CÁC HÀM HỖ TRỢ
 # ==============================================================================
 
-def gemini_summarize_sync(text, max_words=500):
-    if not text or not GEMINI_API_KEY: return None
+def gemini_summarize_sync(text, brand_name, max_words=500):
+    """
+    Tóm tắt nội dung video, tập trung vào Brand Name
+    """
+    if not text or not gemini_model: return None
     try:
-        text = text[:10000]
+        text = text[:10000] # Giới hạn input
+        
+        # Prompt động theo Brand Name
         prompt = f"""Hãy tóm tắt nội dung sau đây thành khoảng {max_words} từ. 
-Tập trung vào những điểm chính và thông tin quan trọng nhất.
+Tập trung vào những điểm chính và thông tin quan trọng nhất liên quan đến thương hiệu "{brand_name}".
 Trả lời bằng Tiếng Việt.
 
 Nội dung:
 {text}
 
 Tóm tắt:"""
+        
         response = gemini_model.generate_content(prompt)
         return response.text
     except Exception as e:
         logger.error(f"⚠️ Gemini summarization failed: {e}")
         return None
 
+async def gemini_summarize(text, brand_name, max_words=500):
+    loop = asyncio.get_running_loop()
+    if not gemini_model: return ""
+    await asyncio.sleep(5) # Rate limiting nhẹ
+    return await loop.run_in_executor(executor, gemini_summarize_sync, text, brand_name, max_words)
+
 def get_dislikes_sync(video_id):
     try:
         url = f"https://returnyoutubedislikeapi.com/votes?videoId={video_id}"
-        resp = requests.get(url, timeout=5)
+        resp = requests.get(url, timeout=3)
         if resp.status_code == 200:
             return resp.json().get("dislikes", 0)
     except:
         pass
     return 0
 
-def get_transcript_sync(video_id):
-    try:
-        api = YouTubeTranscriptApi()
-        transcript_list = api.list_transcripts(video_id)
-        
-        # 1. Tiếng Việt
-        try:
-            t = transcript_list.find_transcript(['vi'])
-            return " ".join([item['text'] for item in t.fetch()]), "youtube-vi"
-        except: pass
-        
-        # 2. Dịch sang Tiếng Việt
-        try:
-            t = transcript_list.find_transcript(['en', 'en-US']).translate('vi')
-            return " ".join([item['text'] for item in t.fetch()]), "youtube-translated-vi"
-        except: pass
-
-        # 3. Fallback
-        for t in transcript_list:
-            if t.is_translatable:
-                return " ".join([item['text'] for item in t.translate('vi').fetch()]), "youtube-auto-translated"
-            return " ".join([item['text'] for item in t.fetch()]), f"youtube-{t.language_code}"
-            
-    except Exception:
-        return "", ""
-    return "", ""
-
-async def gemini_summarize(text, max_words=500):
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(executor, gemini_summarize_sync, text, max_words)
-
 async def get_dislikes(video_id):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(executor, get_dislikes_sync, video_id)
+
+def get_transcript_sync(video_id):
+    """
+    Lấy phụ đề YouTube (bao gồm cả tự động)
+    """
+    try:
+        # Phương pháp 1: Sử dụng list_transcripts (phiên bản mới >= 0.5.0)
+        try:
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            
+            # 1. Thử lấy phụ đề thủ công Tiếng Việt
+            try:
+                transcript = transcript_list.find_manually_created_transcript(['vi'])
+            except:
+                # 2. Thử lấy phụ đề tự động Tiếng Việt
+                try:
+                    transcript = transcript_list.find_generated_transcript(['vi'])
+                except:
+                    # 3. Thử lấy phụ đề thủ công Tiếng Anh
+                    try:
+                        transcript = transcript_list.find_manually_created_transcript(['en'])
+                    except:
+                        # 4. Thử lấy phụ đề tự động Tiếng Anh
+                        try:
+                            transcript = transcript_list.find_generated_transcript(['en'])
+                        except:
+                            # 5. Lấy bất kỳ phụ đề nào
+                            try:
+                                manual = [t for t in transcript_list if not t.is_generated]
+                                if manual: transcript = manual[0]
+                                else:
+                                    generated = [t for t in transcript_list if t.is_generated]
+                                    if generated: transcript = generated[0]
+                                    else: return "", ""
+                            except: return "", ""
+
+            # Dịch sang Tiếng Việt nếu không phải Tiếng Việt
+            if transcript.language_code not in ['vi', 'vi-VN']:
+                try:
+                    transcript = transcript.translate('vi')
+                except Exception:
+                    pass
+
+            # Lấy nội dung phụ đề
+            full_text = " ".join([t['text'] for t in transcript.fetch()])
+            transcript_type = "auto-generated" if transcript.is_generated else "manual"
+            return full_text, transcript_type
+            
+        except AttributeError:
+            # Phương pháp 2: Fallback cho phiên bản cũ
+            try:
+                transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['vi', 'en'])
+                full_text = " ".join([t['text'] for t in transcript])
+                return full_text, "available"
+            except:
+                return "", ""
+
+    except (TranscriptsDisabled, NoTranscriptFound):
+        return "", ""
+    except Exception as e:
+        logger.error(f"💥 Video {video_id}: Lỗi transcript: {e}")
+        return "", ""
 
 async def get_transcript(video_id):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(executor, get_transcript_sync, video_id)
 
 def _convert_timestamp(ts: Any) -> datetime:
-    if isinstance(ts, (int, float)):
-        return datetime.fromtimestamp(ts)
+    if isinstance(ts, (int, float)): return datetime.fromtimestamp(ts)
     if isinstance(ts, str):
         try: return datetime.strptime(ts, '%Y%m%d')
         except: pass
     return datetime.now()
 
 def calculate_priority_score(video: Dict, reference_date: datetime) -> Tuple[float, int]:
-    """
-    Tính điểm ưu tiên cho video:
-    - Video trong 30 ngày: Điểm cao (dựa vào view count)
-    - Video > 30 ngày: Bị phạt MẠNH (giảm điểm theo cấp số nhân)
+    """Tính điểm ưu tiên để lọc video"""
+    view = video.get('view_count', 0) or 0
+    u_date = video.get('upload_date')
     
-    Công thức:
-    - Nếu <= 30 ngày: score = view_count × (1.0 ~ 2.0) [bonus theo độ mới]
-    - Nếu > 30 ngày: score = view_count × penalty_factor [giảm mạnh]
+    u_time = None
+    if u_date and isinstance(u_date, str):
+         try: u_time = datetime.strptime(u_date, '%Y%m%d')
+         except: pass
+    if not u_time: u_time = reference_date - timedelta(days=60)
     
-    Returns:
-        Tuple[float, int]: (Điểm ưu tiên, Số ngày tuổi)
-    """
-    view_count = video.get('view_count', 0) or 0
-    upload_date = video.get('upload_date')
-    timestamp = video.get('timestamp')
+    days = (reference_date - u_time).days
+    if days < 0: days = 0
     
-    # Parse upload date - ưu tiên timestamp trước
-    upload_datetime = None
-    
-    # Thử parse từ timestamp trước
-    if timestamp:
-        try:
-            if isinstance(timestamp, (int, float)):
-                upload_datetime = datetime.fromtimestamp(timestamp)
-            elif isinstance(timestamp, str):
-                upload_datetime = datetime.fromtimestamp(int(timestamp))
-        except:
-            pass
-    
-    # Nếu không có timestamp, dùng upload_date
-    if not upload_datetime and upload_date:
-        if isinstance(upload_date, str) and upload_date != 'N/A':
-            try:
-                upload_datetime = datetime.strptime(upload_date, '%Y%m%d')
-            except:
-                pass
-    
-    # Nếu vẫn không có, coi như video cũ (60 ngày)
-    if not upload_datetime:
-        upload_datetime = reference_date - timedelta(days=60)
-    
-    # Tính số ngày kể từ khi upload
-    days_old = (reference_date - upload_datetime).days
-    if days_old < 0:
-        days_old = 0
-    
-    # === CÔNG THỨC ƯU TIÊN ===
-    
-    if days_old <= 30:
-        # Video trong 30 ngày: Được ưu tiên cao
-        # Bonus tăng dần cho video mới hơn
-        # 0-7 ngày: bonus 2.0x
-        # 8-14 ngày: bonus 1.7x
-        # 15-21 ngày: bonus 1.4x
-        # 22-30 ngày: bonus 1.2x
-        
-        if days_old <= 7:
-            recency_bonus = 2.0
-        elif days_old <= 14:
-            recency_bonus = 1.7
-        elif days_old <= 21:
-            recency_bonus = 1.4
-        else:  # 22-30 ngày
-            recency_bonus = 1.2
-        
-        score = view_count * recency_bonus
-        
-    else:
-        # Video > 30 ngày: Bị phạt MẠNH
-        # Công thức penalty: 0.5 ^ ((days_old - 30) / 30)
-        # 31-60 ngày: giảm còn 50% -> 25%
-        # 61-90 ngày: giảm còn 25% -> 12.5%
-        # 91+ ngày: giảm còn < 10%
-        
-        extra_days = days_old - 30
-        penalty_factor = 0.5 ** (extra_days / 30)
-        
-        # Đảm bảo penalty không quá nhỏ (tối thiểu 1%)
-        penalty_factor = max(penalty_factor, 0.01)
-        
-        score = view_count * penalty_factor
-    
-    return score, days_old
+    # Ưu tiên video trong 30 ngày gần nhất
+    score = view * (1.5 if days <= 30 else 0.1)
+    return score, days
 
 # ==============================================================================
-# 2. CORE LOGIC
+# 3. CORE LOGIC
 # ==============================================================================
 
-async def get_video_details_and_save(db_ops, url, analyzer, video_metadata=None):
-    """
-    Lấy chi tiết video và lưu vào database
-    
-    Args:
-        db_ops: Database operations object
-        url: Video URL
-        analyzer: Sentiment analyzer
-        video_metadata: Metadata từ search (có thể có upload_date)
-    """
+async def get_video_details_and_save(db_ops, url, sentiment_model, brand_name, video_metadata=None):
     loop = asyncio.get_running_loop()
     
     ydl_opts = {
@@ -223,10 +208,9 @@ async def get_video_details_and_save(db_ops, url, analyzer, video_metadata=None)
         'skip_download': True,
         'getcomments': True,
         'ignoreerrors': True,
-        'extractor_args': {'youtube': {'max_comments': ['100'], 'comment_sort': ['top']}},
+        'extractor_args': {'youtube': {'max_comments': ['50'], 'comment_sort': ['top']}},
     }
 
-    # 1. Lấy Metadata
     try:
         def fetch_meta():
             with YoutubeDL(ydl_opts) as ydl:
@@ -239,25 +223,31 @@ async def get_video_details_and_save(db_ops, url, analyzer, video_metadata=None)
     if not info: return False
     video_id = info.get('id')
     
-    # Merge metadata từ search nếu có (để giữ upload_date)
     if video_metadata:
         if not info.get('upload_date') and video_metadata.get('upload_date'):
             info['upload_date'] = video_metadata.get('upload_date')
-        if not info.get('timestamp') and video_metadata.get('timestamp'):
-            info['timestamp'] = video_metadata.get('timestamp')
-    
-    # 2. Lấy Transcript & Summary
+
+    # Xử lý nội dung & AI
     transcript_text, _ = await get_transcript(video_id)
     summary = ""
     if transcript_text:
-        summary = await gemini_summarize(transcript_text, max_words=300)
+        summary = await gemini_summarize(transcript_text, brand_name, max_words=300)
     elif info.get('description'):
-        summary = await gemini_summarize(info.get('description'), max_words=200)
+        summary = await gemini_summarize(info.get('description'), brand_name, max_words=200)
 
-    # 3. Dislikes
+    full_content = f"{info.get('title', '')} . {info.get('description', '')}"
+    video_sentiment_score = sentiment_model.predict(full_content)
+    
+    sentiment_label = "NEUTRAL"
+    if video_sentiment_score > 0.15: sentiment_label = "POSITIVE"
+    elif video_sentiment_score < -0.15: sentiment_label = "NEGATIVE"
+
     dislikes = await get_dislikes(video_id)
-
-    # 4. Lưu Post
+    views = info.get("view_count", 0)
+    likes = info.get("like_count", 0)
+    comments_count = info.get("comment_count", 0)
+    
+    # Lưu Post sơ bộ
     post_data = {
         "platform": "youtube",
         "source_url": url,
@@ -265,75 +255,149 @@ async def get_video_details_and_save(db_ops, url, analyzer, video_metadata=None)
         "title": info.get('title', 'No Title'),
         "content": summary if summary else info.get('description', ''),
         "original_transcript": transcript_text[:1000] + "..." if len(transcript_text) > 1000 else transcript_text,
-        "views_count": info.get("view_count", 0),
-        "likes_count": info.get("like_count", 0),
+        "views_count": views,
+        "likes_count": likes,
         "dislikes_count": dislikes,
-        "comments_count": info.get("comment_count", 0),
-        "published_at": _convert_timestamp(info.get('upload_date') or info.get('timestamp')),
+        "comments_count": comments_count,
+        "published_at": _convert_timestamp(info.get('upload_date')),
         "collected_at": datetime.now(),
-        "language": "vi",
-        "is_processed": True
+        "is_processed": True,
+        "ai_sentiment_raw": video_sentiment_score,
+        "sentiment_label": sentiment_label,
+        "brand_name": brand_name
     }
 
     post_id = await db_ops.insert_post(post_data)
     if not post_id: return False
 
-    # 5. Xử lý Comment
-    raw_comments = info.get('comments') or [] 
+    # Xử lý Comment
+    raw_comments = info.get('comments') or []
+    total_comment_sentiment = 0.0
+    processed_count = 0
+    target_comments = 30
     
-    if raw_comments:
+    for c in raw_comments[:target_comments]:
+        if not c.get('text'): continue
         try:
-            raw_comments.sort(key=lambda x: x.get('like_count', 0) or 0, reverse=True)
-        except Exception as e:
-            logger.warning(f"Error sorting comments for {video_id}: {e}")
+            cmt_score = sentiment_model.predict(c['text'])
+            cmt_label = "NEUTRAL"
+            if cmt_score > 0.15: cmt_label = "POSITIVE"
+            elif cmt_score < -0.15: cmt_label = "NEGATIVE"
 
-        saved_comments = 0
-        for c in raw_comments[:20]:
-            if not c.get('text'): continue
-            try:
-                sent = await analyzer.analyze_sentiment(c['text'])
-                comment_doc = {
-                    "post_id": post_id,
-                    "author": c.get('author'),
-                    "content": c.get('text'),
-                    "likes_count": c.get('like_count', 0),
-                    "published_at": _convert_timestamp(c.get('timestamp')),
-                    "collected_at": datetime.now(),
-                    "sentiment": sent["sentiment"],
-                    "sentiment_score": sent["sentiment_score"]
-                }
-                await db_ops.insert_comment(comment_doc)
-                saved_comments += 1
-            except: continue
-        logger.info(f"✅ Saved: {post_data['title'][:50]}... (V:{post_data['views_count']:,}, C:{saved_comments})")
+            await db_ops.insert_comment({
+                "post_id": post_id,
+                "author": c.get('author'),
+                "content": c.get('text'),
+                "likes_count": c.get('like_count', 0),
+                "published_at": _convert_timestamp(c.get('timestamp')),
+                "sentiment": cmt_label,
+                "sentiment_score": cmt_score
+            })
+            total_comment_sentiment += cmt_score
+            processed_count += 1
+        except: continue
+    
+    # --- TÍNH TOÁN ĐIỂM SỐ (MARKETING SCORE) ---
+    
+    # 1. Điểm Cảm xúc Tổng hợp
+    if processed_count > 0:
+        avg_comment_sentiment = total_comment_sentiment / processed_count
     else:
-        logger.info(f"✅ Saved: {post_data['title'][:50]}... (Views: {post_data['views_count']:,}, Comments disabled/empty)")
-        
+        avg_comment_sentiment = video_sentiment_score
+
+    total_reactions = likes + dislikes
+    reaction_score = 0.0
+    if total_reactions > 0:
+        reaction_score = (likes - dislikes) / total_reactions
+    
+    final_sentiment = (video_sentiment_score * 0.3) + (avg_comment_sentiment * 0.5) + (reaction_score * 0.2)
+
+    # 2. View Impact (Log10 ^ 1.3) -> Thưởng lớn cho Video Viral
+    if views > 0:
+        # Ví dụ: 1M view -> Log=6 -> 6^1.3 = 10.3 điểm
+        # 100k view -> Log=5 -> 5^1.3 = 8.1 điểm
+        view_factor = math.pow(math.log10(views + 1), 1.3)
+    else: 
+        view_factor = 0
+    
+    # Engagement Bonus
+    engagement_factor = 1 + ((total_reactions + comments_count * 2) / max(views, 1) * 200)
+    raw_impact = view_factor * engagement_factor
+
+    # 3. Time Decay (Cấp số nhân lùi: 0.1 ^ (số tháng))
+    pub_date = _convert_timestamp(info.get('upload_date'))
+    age_days = (datetime.now() - pub_date).days
+    if age_days < 0: age_days = 0
+    
+    # Công thức: 0.1 mũ (số ngày / 30)
+    # - Ngày 0: 0.1^0 = 1 (100%)
+    # - Ngày 15: 0.1^0.5 = 0.31 (31%)
+    # - Ngày 30: 0.1^1 = 0.1 (10%)
+    # - Ngày 60: 0.1^2 = 0.01 (1%)
+    time_decay = math.pow(0.1, age_days / 30.0)
+
+    # 4. Marketing Score Final
+    # Nhân thêm 2.5 để scale điểm lên trước khi nén sigmoid
+    marketing_score = 10 * (1 - math.exp(-(abs(final_sentiment) * raw_impact * time_decay * 2.5) / 25))
+    marketing_score = round(marketing_score, 2)
+
+    final_label = "NEUTRAL"
+    if final_sentiment > 0.15: final_label = "POSITIVE"
+    elif final_sentiment < -0.15: final_label = "NEGATIVE"
+
+    update_data = {
+        "crowd_sentiment": round(avg_comment_sentiment, 3),
+        "reaction_score": round(reaction_score, 3),
+        "sentiment_score": round(final_sentiment, 3),   
+        "marketing_score": marketing_score,  
+        "sentiment": final_label
+    }
+
+    await db_ops.update_post_score(post_id, update_data)
+
+    logger.info(f"✅ Saved: {info.get('title', '')[:20]}... | MktScore: {marketing_score} | ViewImpact: {round(view_factor, 1)} | Decay: {round(time_decay, 3)}")
     return True
 
-async def search_and_collect_top_20_videos():
+async def search_and_collect_videos(keywords: List[str] = None, brand_name: str = None, blacklist: List[str] = [], api_keys: List[str] = []):
     """
-    CHIẾN LƯỢC MỚI:
-    1. Tìm 500 video URLs (search flat)
-    2. Fetch metadata (upload_date) cho mỗi video
-    3. Tính điểm ưu tiên (ưu tiên video trong 30 ngày)
-    4. Lấy top 20 video có điểm cao nhất
-    5. Lưu và phân tích đầy đủ 20 video đó
+    Hàm chính [CẬP NHẬT]:
+    - blacklist: Danh sách từ khóa cấm để lọc video.
+    - api_keys: Danh sách key API để chọn ngẫu nhiên cho Gemini.
     """
+    if not keywords or not brand_name:
+        logger.warning("⚠️ Thiếu Keywords hoặc Brand Name. Bỏ qua thu thập YouTube.")
+        return 0
+
     db_ops = DatabaseOperations()
-    analyzer = VietnameseSentimentAnalyzer()
+    
+    # --- [MỚI] CẤU HÌNH API KEY ĐỘNG ---
+    global gemini_model
+    if api_keys:
+        try:
+            # Chọn ngẫu nhiên 1 key trong danh sách
+            selected_key = random.choice(api_keys)
+            genai.configure(api_key=selected_key)
+            gemini_model = genai.GenerativeModel(settings.GEMINI_MODEL)
+            # logger.info(f"🔑 YoutubeCollector dùng Key: ...{selected_key[-4:]}")
+        except Exception as e:
+            logger.warning(f"⚠️ Lỗi cấu hình Dynamic Key: {e}. Dùng key mặc định.")
+
+    logger.info("🤖 Loading Custom AI Model...")
+    try:
+        sentiment_model = CustomSentimentModel()
+    except Exception as e:
+        logger.error(f"Lỗi load model AI: {e}")
+        return 0
     
     now = datetime.now()
-    days_ago_30 = now - timedelta(days=30)
-    date_str = days_ago_30.strftime('%Y%m%d')
     
-    query = " | ".join(VINGROUP_KEYWORDS[:5])
-    logger.info(f"🚀 Searching latest videos since {date_str}...")
+    # Tạo Query Search từ 5 từ khóa đầu tiên của User
+    query = " | ".join(keywords[:5])
+    logger.info(f"🚀 Tìm kiếm Video cho Brand: {brand_name} | Query: {query}")
     
-    # BƯỚC 1: Search để lấy danh sách video URLs
     ydl_search_opts = {
         'quiet': True,
-        'extract_flat': True,  # Chỉ lấy URLs thôi
+        'extract_flat': True, 
         'skip_download': True,
         'ignoreerrors': True,
     }
@@ -344,130 +408,87 @@ async def search_and_collect_top_20_videos():
     try:
         def run_search():
             with YoutubeDL(ydl_search_opts) as ydl:
-                # Tìm nhiều video hơn để có đủ sau khi filter
-                return ydl.extract_info(f"ytsearch500:{query}", download=False)
+                # Tìm 200 video để có đủ nguồn lọc
+                return ydl.extract_info(f"ytsearch200:{query}", download=False)
         
         info = await loop.run_in_executor(executor, run_search)
-        
         if 'entries' in info:
             found_entries = [e for e in info['entries'] if e and e.get('id')]
-            logger.info(f"📊 Found {len(found_entries)} video URLs")
-    except Exception as e:
-        logger.error(f"Search error: {e}")
-        return 0
+    except: return 0
 
-    if not found_entries:
-        logger.warning("⚠️ No videos found!")
-        return 0
+    # --- [MỚI] LỌC BLACKLIST ---
+    filtered_entries = []
+    for vid in found_entries:
+        title = vid.get('title', '').lower()
+        is_spam = False
+        if blacklist:
+            for bad_word in blacklist:
+                if bad_word in title:
+                    is_spam = True
+                    break
+        if not is_spam:
+            filtered_entries.append(vid)
+
+    logger.info(f"📥 Tìm thấy {len(filtered_entries)} video sạch (đã loại {len(found_entries) - len(filtered_entries)} video rác). Đang lấy metadata...")
     
-    # BƯỚC 2: Fetch metadata nhẹ cho mỗi video để lấy upload_date
-    logger.info(f"📥 Fetching metadata for {len(found_entries)} videos (this may take a while)...")
-    
-    async def fetch_video_metadata(video_entry):
-        """Fetch minimal metadata để lấy upload_date và view_count"""
+    # Helper fetch metadata
+    async def fetch_meta(vid):
         try:
-            url = video_entry.get('url') or f"https://www.youtube.com/watch?v={video_entry.get('id')}"
-            
-            def get_info():
-                with YoutubeDL({'quiet': True, 'skip_download': True, 'no_warnings': True}) as ydl:
+            url = vid.get('url') or f"https://www.youtube.com/watch?v={vid.get('id')}"
+            def get():
+                with YoutubeDL({'quiet':True, 'skip_download':True}) as ydl:
                     return ydl.extract_info(url, download=False)
-            
-            video_info = await loop.run_in_executor(executor, get_info)
-            
-            if video_info:
-                return {
-                    'id': video_info.get('id'),
-                    'url': url,
-                    'title': video_info.get('title'),
-                    'view_count': video_info.get('view_count', 0),
-                    'upload_date': video_info.get('upload_date'),
-                    'timestamp': video_info.get('timestamp'),
-                }
-        except Exception as e:
-            logger.debug(f"Failed to fetch metadata for {video_entry.get('id')}: {e}")
-            return None
-    
-    # Fetch metadata song song (batch processing)
-    batch_size = 10
-    videos_with_metadata = []
-    
-    for i in range(0, len(found_entries), batch_size):
-        batch = found_entries[i:i+batch_size]
-        tasks = [fetch_video_metadata(vid) for vid in batch]
-        results = await asyncio.gather(*tasks)
-        videos_with_metadata.extend([r for r in results if r and r.get('view_count')])
+            data = await loop.run_in_executor(executor, get)
+            if data: return {
+                'id': data.get('id'), 'url': url, 'title': data.get('title'),
+                'view_count': data.get('view_count', 0), 'upload_date': data.get('upload_date')
+            }
+        except: return None
         
-        logger.info(f"  Progress: {min(i+batch_size, len(found_entries))}/{len(found_entries)} videos processed")
-        await asyncio.sleep(1)  # Rate limiting
+    videos_with_meta = []
+    batch_size = 40
     
-    logger.info(f"✅ Successfully fetched metadata for {len(videos_with_metadata)} videos")
-    
-    if not videos_with_metadata:
-        logger.warning("⚠️ No valid video metadata found!")
-        return 0
-    
-    # BƯỚC 3: Tính điểm ưu tiên cho mỗi video
-    logger.info(f"🧮 Calculating priority scores (30-day preference)...")
-    for vid in videos_with_metadata:
-        score, days = calculate_priority_score(vid, now)
-        vid['priority_score'] = score
-        vid['days_old'] = days
-    
-    # BƯỚC 4: Sắp xếp theo điểm ưu tiên và lấy top 20
-    videos_with_metadata.sort(key=lambda x: x.get('priority_score', 0), reverse=True)
-    top_20_videos = videos_with_metadata[:20]
-    
-    # BƯỚC 5: Hiển thị kết quả
-    logger.info(f"🎯 Top 20 videos by priority score (30-day preference):")
-    for i, vid in enumerate(top_20_videos[:10], 1):
-        views = vid.get('view_count', 0)
-        score = vid.get('priority_score', 0)
-        days_old = vid.get('days_old', -1)
-        title = vid.get('title', 'N/A')[:60]
+    for i in range(0, len(filtered_entries), batch_size):
+        batch = filtered_entries[i:i+batch_size]
+        res = await asyncio.gather(*[fetch_meta(v) for v in batch])
+        videos_with_meta.extend([r for r in res if r])
+        await asyncio.sleep(0.1)
         
-        # Hiển thị status dựa trên tuổi video
-        if days_old <= 7:
-            status = "🔥 NEW"
-        elif days_old <= 30:
-            status = "✅ RECENT"
-        elif days_old <= 60:
-            status = "⚠️ OLD"
-        else:
-            status = "❌ VERY OLD"
+    # Tính điểm và lọc
+    for v in videos_with_meta:
+        score, _ = calculate_priority_score(v, now)
+        v['priority_score'] = score
         
-        logger.info(f"  {i}. {title}")
-        logger.info(f"     {status} | Views: {views:,} | Age: {days_old}d | Score: {score:,.0f}")
-
-    # BƯỚC 6: Lưu 20 video vào database
+    videos_with_meta.sort(key=lambda x: x.get('priority_score', 0), reverse=True)
+    
+    # Lấy Top 50 video chất lượng nhất để xử lý sâu
+    top_videos = videos_with_meta[:50]
+    
+    logger.info(f"🎯 Chọn Top {len(top_videos)} video để phân tích sâu...")
+    
     count = 0
-    for vid in top_20_videos:
-        url = vid.get('url')
-        if not url:
+    for vid in top_videos:
+        if await db_ops.get_post_by_url(vid['url']): 
             continue
-            
-        if await db_ops.get_post_by_url(url):
-            logger.info(f"⏭️  Skipping existing: {url}")
-            continue
-            
         try:
-            # Pass metadata từ search để giữ thông tin upload_date
-            success = await get_video_details_and_save(db_ops, url, analyzer, video_metadata=vid)
-            if success:
-                count += 1
-                await asyncio.sleep(2)  # Tránh rate limit
-        except Exception as e:
-            logger.error(f"❌ Error processing video {url}: {e}")
-            continue
-
+            # Truyền brand_name vào hàm xử lý chi tiết
+            success = await get_video_details_and_save(db_ops, vid['url'], sentiment_model, brand_name, vid)
+            if success: count += 1
+        except: continue
+        
     return count
 
 async def main():
+    # Test chạy độc lập
     await db_manager.connect()
     try:
-        saved_count = await search_and_collect_top_20_videos()
-        logger.info(f"🏁 Completed. Saved {saved_count} new videos.")
-    except Exception as e:
-        logger.exception(f"Fatal error in main: {e}")
+        c = await search_and_collect_videos(
+            keywords=["VinFast", "VF8"], 
+            brand_name="VinFast",
+            blacklist=["xổ số", "game bài"], # Test blacklist
+            api_keys=[] # Test api keys
+        )
+        logger.info(f"🏁 Hoàn tất. Đã lưu {c} video vào hệ thống.")
     finally:
         await db_manager.disconnect()
 

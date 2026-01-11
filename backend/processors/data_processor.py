@@ -1,293 +1,142 @@
-"""
-Data Processing Pipeline for VinFast Social Listening Platform
-Handles data cleaning, preprocessing, and sentiment analysis
-"""
-
-import asyncio
-from typing import List, Dict, Any
-from datetime import datetime, timedelta
-from collections import Counter
-import numpy as np
-from loguru import logger
-
+import re
+import html
+from typing import List, Dict
 from backend.database.connection import DatabaseOperations
-from backend.processors.vietnamese_sentiment import sentiment_analyzer
-from backend.config.settings import settings
-
+from loguru import logger
 class DataProcessor:
-    """Main data processing pipeline"""
-    
-    def __init__(self):
-        self.db_ops = DatabaseOperations()
-        self.sentiment_analyzer = sentiment_analyzer
-    
-    async def process_unprocessed_data(self, batch_size: int = 50) -> Dict[str, Any]:
-        """Process unprocessed posts and comments"""
-        logger.info("Starting data processing pipeline...")
-        
-        # Get unprocessed posts
-        unprocessed_posts = await self.db_ops.get_unprocessed_posts(batch_size)
-        
-        if not unprocessed_posts:
-            logger.info("No unprocessed posts found")
-            return {"processed_posts": 0, "processed_comments": 0}
-        
-        logger.info(f"Processing {len(unprocessed_posts)} posts...")
-        
-        processed_count = 0
-        for post in unprocessed_posts:
-            try:
-                await self._process_single_post(post)
-                processed_count += 1
-                
-                # Delay between processing to avoid overwhelming resources
-                await asyncio.sleep(0.5)
-                
-            except Exception as e:
-                logger.error(f"Error processing post {post.get('_id')}: {e}")
-                continue
-        
-        logger.info(f"Processed {processed_count} posts successfully")
-        return {"processed_posts": processed_count, "processed_comments": 0}
-    
-    async def _process_single_post(self, post: Dict[str, Any]):
-        """Process a single post for sentiment analysis and keyword extraction"""
-        try:
-            content = post.get("content", "")
-            title = post.get("title", "")
-            full_text = f"{title} {content}".strip()
-            
-            if not full_text:
-                logger.warning(f"Empty content for post {post.get('_id')}")
-                return
-            
-            # Clean and preprocess text
-            cleaned_text = self._clean_text(full_text)
-            
-            # Perform sentiment analysis
-            sentiment_result = await self.sentiment_analyzer.analyze_sentiment(cleaned_text)
-            
-            # Extract keywords
-            keywords = self.sentiment_analyzer.extract_keywords(cleaned_text, top_k=15)
-            
-            # Extract VinFast-specific topics
-            topics = self._extract_topics(cleaned_text)
-            
-            # Prepare analysis data
-            analysis_data = {
-                "sentiment": sentiment_result["sentiment"],
-                "sentiment_score": sentiment_result["sentiment_score"],
-                "confidence_score": sentiment_result["confidence_score"],
-                "keywords": keywords,
-                "topics": topics,
-                "processed_at": datetime.now()
-            }
-            
-            # Update post in database
-            await self.db_ops.update_post_analysis(post["_id"], analysis_data)
-            
-            logger.debug(f"Successfully processed post {post['_id']} - Sentiment: {sentiment_result['sentiment']}")
-            
-        except Exception as e:
-            logger.error(f"Error processing post {post.get('_id')}: {e}")
-            raise
-    
-    def _clean_text(self, text: str) -> str:
-        """Clean and normalize Vietnamese text"""
+    @staticmethod
+    def clean_text(text: str) -> str:
+        """
+        Làm sạch văn bản: chuyển chữ thường, xóa HTML, xóa ký tự đặc biệt, xóa link.
+        """
         if not text:
             return ""
         
-        # Remove HTML tags
-        import re
+        # 1. Chuyển về chữ thường
+        text = str(text).lower()
+        
+        # 2. Xóa HTML tags (nếu có)
+        text = html.unescape(text)
         text = re.sub(r'<[^>]+>', '', text)
         
-        # Normalize Vietnamese characters
-        text = self._normalize_vietnamese(text)
+        # 3. Xóa URL
+        text = re.sub(r'http\S+|www\S+|https\S+', '', text, flags=re.MULTILINE)
         
-        # Remove excessive punctuation
-        text = re.sub(r'[.]{3,}', '...', text)
-        text = re.sub(r'[!]{2,}', '!', text)
-        text = re.sub(r'[?]{2,}', '?', text)
+        # 4. Xóa Email
+        text = re.sub(r'\S+@\S+', '', text)
         
-        # Remove extra whitespace
+        # 5. Xóa ký tự đặc biệt và số (giữ lại chữ cái tiếng Việt)
+        # Regex này giữ lại các ký tự từ a-z, số 0-9 và các dấu tiếng Việt
+        text = re.sub(r'[^\w\sàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]', ' ', text)
+        
+        # 6. Xóa khoảng trắng thừa
         text = re.sub(r'\s+', ' ', text).strip()
         
         return text
-    
-    def _normalize_vietnamese(self, text: str) -> str:
-        """Normalize Vietnamese diacritics and characters"""
-        # Handle common Vietnamese character variations
-        replacements = {
-            'đ': 'd', 'Đ': 'D',  # Optional: keep Vietnamese characters
-            # Add more normalizations if needed
+
+    @staticmethod
+    def normalize_comment(comment_data: dict) -> dict:
+        """
+        Hàm hỗ trợ chuẩn hóa 1 object comment trước khi lưu DB
+        """
+        if "text" in comment_data:
+            comment_data["text_clean"] = DataProcessor.clean_text(comment_data["text"])
+        return comment_data
+
+    @staticmethod
+    def extract_keywords(text: str) -> List[str]:
+        """
+        Trích xuất từ khóa đơn giản (fallback nếu không dùng model chuyên sâu).
+        Tách từ và lọc bỏ các từ dừng (stopwords) cơ bản.
+        """
+        if not text:
+            return []
+        
+        clean_text = DataProcessor.clean_text(text)
+        words = clean_text.split()
+        
+        # Danh sách từ dừng cơ bản tiếng Việt (ví dụ rút gọn)
+        stopwords = {
+            "là", "và", "của", "thì", "mà", "nhưng", "để", "với", "có", "được", 
+            "cho", "về", "các", "những", "này", "cái", "con", "người", "khi",
+            "trong", "đã", "đang", "sẽ", "rất", "cũng"
         }
         
-        # For now, keep Vietnamese characters as they are important for sentiment
-        return text
-    
-    def _extract_topics(self, text: str) -> List[str]:
-        """Extract VinFast-related topics from text"""
-        topics = []
+        # Lọc từ: không nằm trong stopwords và độ dài > 1
+        keywords = [w for w in words if w not in stopwords and len(w) > 1]
         
-        # VinFast product topics
-        product_keywords = {
-            'vf8': 'VF8 Electric SUV',
-            'vf9': 'VF9 Electric SUV', 
-            'vf5': 'VF5 Electric Car',
-            'fadil': 'VinFast Fadil',
-            'lux a2.0': 'VinFast Lux A2.0',
-            'lux sa2.0': 'VinFast Lux SA2.0',
-            'klara': 'VinFast Klara Electric Scooter'
-        }
+        # Trả về danh sách unique, giới hạn 10 từ
+        return list(set(keywords))[:10]
+    async def calculate_comprehensive_score(self, post_id: str):
+        """
+        Tính toán lại toàn bộ điểm số cho bài viết:
+        1. Phân tích lại nội dung (nếu chưa có)
+        2. Tính trung bình điểm bình luận (Crowd Score)
+        3. Tính điểm tổng hợp (Weighted Score)
+        """
+        db_ops = DatabaseOperations()
         
-        # Business topics
-        business_keywords = {
-            'bán hàng': 'Sales',
-            'kinh doanh': 'Business',
-            'xuất khẩu': 'Export',
-            'thị trường': 'Market',
-            'cổ phiếu': 'Stock',
-            'đầu tư': 'Investment',
-            'nhà máy': 'Factory',
-            'sản xuất': 'Manufacturing'
-        }
-        
-        # Technical topics
-        tech_keywords = {
-            'xe điện': 'Electric Vehicle',
-            'pin xe điện': 'EV Battery',
-            'sạc xe điện': 'EV Charging',
-            'tự lái': 'Autonomous Driving',
-            'công nghệ': 'Technology',
-            'an toàn': 'Safety'
-        }
-        
-        text_lower = text.lower()
-        
-        # Check for product topics
-        for keyword, topic in product_keywords.items():
-            if keyword in text_lower:
-                topics.append(topic)
-        
-        # Check for business topics
-        for keyword, topic in business_keywords.items():
-            if keyword in text_lower:
-                topics.append(topic)
-        
-        # Check for tech topics
-        for keyword, topic in tech_keywords.items():
-            if keyword in text_lower:
-                topics.append(topic)
-        
-        return list(set(topics))  # Remove duplicates
-    
-    async def generate_keyword_frequency(self, 
-                                       start_date: datetime,
-                                       end_date: datetime,
-                                       top_k: int = 50) -> List[Dict[str, Any]]:
-        """Generate keyword frequency analysis for a time period"""
-        try:
-            # Get posts from the specified time period
-            posts = await self.db_ops.get_posts(
-                start_date=start_date.isoformat(),
-                end_date=end_date.isoformat(),
-                limit=1000  # Adjust as needed
-            )
+        # 1. Lấy thông tin bài viết
+        post = await db_ops.get_post_by_id(post_id)
+        if not post:
+            return None
+
+        # 2. Lấy điểm Content (AI Sentiment Raw)
+        # Nếu đã có rồi thì dùng, chưa có thì gọi model predict lại
+        ai_score = post.get('ai_sentiment_raw')
+        if ai_score is None:
+            # Import lười để tránh lỗi vòng lặp
+            from backend.processors.custom_ai import CustomSentimentModel
+            model = CustomSentimentModel()
             
-            # Collect all keywords
-            all_keywords = []
-            for post in posts:
-                keywords = post.get("keywords", [])
-                all_keywords.extend(keywords)
-            
-            # Count keyword frequencies
-            keyword_counter = Counter(all_keywords)
-            
-            # Format results
-            keyword_freq = [
-                {"keyword": keyword, "count": count, "frequency": count / len(all_keywords)}
-                for keyword, count in keyword_counter.most_common(top_k)
+            # Kết hợp tiêu đề và nội dung để phân tích
+            full_text = f"{post.get('title', '')} {post.get('content', '')}"
+            ai_score = model.predict(full_text)
+
+        # 3. Tính điểm Dư luận (Crowd Sentiment) từ Comments
+        comments = await db_ops.get_comments_by_post_id(post_id)
+        crowd_score = 0.0
+        
+        if comments:
+            valid_scores = [
+                c.get('sentiment_score', 0.0) 
+                for c in comments 
+                if c.get('sentiment_score') is not None
             ]
-            
-            logger.info(f"Generated keyword frequency for {len(posts)} posts, top {top_k} keywords")
-            return keyword_freq
-            
-        except Exception as e:
-            logger.error(f"Error generating keyword frequency: {e}")
-            return []
-    
-    async def generate_sentiment_trends(self,
-                                      start_date: datetime,
-                                      end_date: datetime,
-                                      interval: str = "daily") -> List[Dict[str, Any]]:
-        """Generate sentiment trends over time"""
-        try:
-            posts = await self.db_ops.get_posts(
-                start_date=start_date.isoformat(),
-                end_date=end_date.isoformat(),
-                limit=2000
-            )
-            
-            # Group posts by time interval
-            if interval == "daily":
-                delta = timedelta(days=1)
-            elif interval == "weekly":
-                delta = timedelta(weeks=1)
-            else:
-                delta = timedelta(hours=1)
-            
-            trends = []
-            current_date = start_date
-            
-            while current_date < end_date:
-                next_date = current_date + delta
-                
-                # Filter posts for this time period
-                period_posts = [
-                    post for post in posts
-                    if current_date <= datetime.fromisoformat(post["published_at"]) < next_date
-                ]
-                
-                if period_posts:
-                    # Calculate sentiment distribution
-                    sentiments = [post.get("sentiment", "neutral") for post in period_posts]
-                    sentiment_scores = [post.get("sentiment_score", 0.0) for post in period_posts]
-                    
-                    trend_data = {
-                        "date": current_date.isoformat(),
-                        "total_posts": len(period_posts),
-                        "positive_count": sentiments.count("positive"),
-                        "negative_count": sentiments.count("negative"),
-                        "neutral_count": sentiments.count("neutral"),
-                        "avg_sentiment_score": np.mean(sentiment_scores) if sentiment_scores else 0.0
-                    }
-                    
-                    trends.append(trend_data)
-                
-                current_date = next_date
-            
-            logger.info(f"Generated sentiment trends for {len(trends)} time periods")
-            return trends
-            
-        except Exception as e:
-            logger.error(f"Error generating sentiment trends: {e}")
-            return []
+            if valid_scores:
+                crowd_score = sum(valid_scores) / len(valid_scores)
+        
+        # 4. Tính điểm Tổng hợp (Marketing Score)
+        # CÔNG THỨC: 60% Nội dung bài báo + 40% Phản ứng dư luận
+        # Bạn có thể điều chỉnh tỷ lệ này (ví dụ: tin tiêu cực thì comment quan trọng hơn)
+        weight_content = 0.6
+        weight_crowd = 0.4
+        
+        # Nếu không có comment, điểm bài viết quyết định 100%
+        if not comments:
+            final_score = ai_score
+        else:
+            final_score = (ai_score * weight_content) + (crowd_score * weight_crowd)
 
-# Global data processor instance
+        # Xác định nhãn (Label) cuối cùng
+        final_label = "neutral"
+        if final_score > 0.15: final_label = "positive"
+        elif final_score < -0.15: final_label = "negative"
+
+        # 5. Cập nhật vào Database
+        update_data = {
+            "ai_sentiment_raw": ai_score,     # Điểm máy chấm bài viết
+            "crowd_sentiment": crowd_score,   # Điểm trung bình comment
+            "sentiment_score": final_score,   # Điểm số cuối cùng
+            "sentiment": final_label,         # Nhãn cuối cùng
+            "is_processed": True
+        }
+        
+        await db_ops.update_post_analysis(post_id, update_data)
+        logger.info(f"Updated score for {post_id}: AI={ai_score:.2f}, Crowd={crowd_score:.2f} -> Final={final_score:.2f}")
+        
+        return update_data
+    
+
+# --- QUAN TRỌNG: Khởi tạo instance để các module khác import ---
 data_processor = DataProcessor()
-
-# Usage example
-async def main():
-    """Example usage"""
-    from backend.database.connection import db_manager
-    
-    await db_manager.connect()
-    
-    processor = DataProcessor()
-    stats = await processor.process_unprocessed_data()
-    print(f"Processing completed: {stats}")
-    
-    await db_manager.disconnect()
-
-if __name__ == "__main__":
-    asyncio.run(main())

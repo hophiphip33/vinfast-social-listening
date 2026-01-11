@@ -1,213 +1,111 @@
-/**
- * Global styles for VinFast Social Listening Dashboard
- */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
-* {
-  box-sizing: border-box;
-}
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap');
 
-body {
-  margin: 0;
-  font-family: 'Inter', 'Roboto', 'Arial', sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  background-color: #f5f5f5;
-}
+@layer base {
+  :root {
+    /* Dark Dashboard Theme - Social Listening */
+    --background: 222 47% 7%;
+    --foreground: 210 40% 96%;
 
-code {
-  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-}
+    --card: 222 47% 10%;
+    --card-foreground: 210 40% 96%;
 
-/* Custom scrollbar */
-::-webkit-scrollbar {
-  width: 8px;
-}
+    --popover: 222 47% 10%;
+    --popover-foreground: 210 40% 96%;
 
-::-webkit-scrollbar-track {
-  background: #f1f1f1;
-  border-radius: 4px;
-}
+    --primary: 187 100% 50%;
+    --primary-foreground: 222 47% 7%;
 
-::-webkit-scrollbar-thumb {
-  background: #c1c1c1;
-  border-radius: 4px;
-}
+    --secondary: 222 47% 15%;
+    --secondary-foreground: 210 40% 96%;
 
-::-webkit-scrollbar-thumb:hover {
-  background: #a8a8a8;
-}
+    --muted: 222 47% 14%;
+    --muted-foreground: 215 20% 55%;
 
-/* Vietnamese font optimization */
-.vietnamese-text {
-  font-family: 'Inter', 'Roboto', 'Times New Roman', serif;
-  line-height: 1.6;
-}
+    --accent: 187 100% 50%;
+    --accent-foreground: 222 47% 7%;
 
-/* Loading animations */
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(20px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 210 40% 98%;
+
+    --success: 142 76% 46%;
+    --success-foreground: 210 40% 98%;
+
+    --warning: 38 92% 50%;
+    --warning-foreground: 222 47% 7%;
+
+    --border: 222 47% 18%;
+    --input: 222 47% 15%;
+    --ring: 187 100% 50%;
+
+    --radius: 0.75rem;
+
+    /* Custom tokens */
+    --glow-primary: 0 0 30px hsl(187 100% 50% / 0.3);
+    --gradient-card: linear-gradient(135deg, hsl(222 47% 12%) 0%, hsl(222 47% 8%) 100%);
+    --gradient-header: linear-gradient(90deg, hsl(187 100% 50% / 0.1) 0%, transparent 50%);
   }
 }
 
-.fade-in {
-  animation: fadeIn 0.5s ease-in-out;
-}
-
-@keyframes pulse {
-  0%, 100% {
-    transform: scale(1);
+@layer base {
+  * {
+    @apply border-border;
   }
-  50% {
-    transform: scale(1.05);
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-family: 'Inter', system-ui, sans-serif;
   }
-}
 
-.pulse-animation {
-  animation: pulse 2s infinite;
-}
-
-/* Custom styles for charts */
-.chart-container {
-  position: relative;
-  height: 300px;
-  width: 100%;
-}
-
-.chart-container.large {
-  height: 400px;
-}
-
-.chart-container.small {
-  height: 200px;
-}
-
-/* Word cloud container */
-.wordcloud-container {
-  width: 100%;
-  height: 400px;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  border-radius: 12px;
-  overflow: hidden;
-}
-
-/* Status indicators */
-.status-dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  margin-right: 8px;
-}
-
-.status-dot.positive {
-  background-color: #4caf50;
-}
-
-.status-dot.negative {
-  background-color: #f44336;
-}
-
-.status-dot.neutral {
-  background-color: #ff9800;
-}
-
-.status-dot.active {
-  background-color: #2196f3;
-  animation: pulse 2s infinite;
-}
-
-/* Card hover effects */
-.interactive-card {
-  transition: all 0.2s ease-in-out;
-  cursor: pointer;
-}
-
-.interactive-card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 16px rgba(0,0,0,0.15) !important;
-}
-
-/* Vietnamese text selection */
-::selection {
-  background-color: #1976d2;
-  color: white;
-}
-
-/* Responsive typography for Vietnamese */
-@media (max-width: 768px) {
-  .vietnamese-text {
-    font-size: 14px;
+  code, pre, .mono {
+    font-family: 'JetBrains Mono', monospace;
   }
 }
 
-/* Loading skeleton styles */
-.skeleton {
-  background: linear-gradient(90deg, #f0f0f0 25%, transparent 37%, #f0f0f0 63%);
-  background-size: 400% 100%;
-  animation: skeleton-loading 1.4s ease infinite;
-}
-
-@keyframes skeleton-loading {
-  0% {
-    background-position: 100% 50%;
+@layer utilities {
+  .glow-primary {
+    box-shadow: var(--glow-primary);
   }
-  100% {
-    background-position: 0% 50%;
+
+  .gradient-card {
+    background: var(--gradient-card);
   }
-}
 
-/* Error and empty states */
-.error-state {
-  text-align: center;
-  padding: 40px 20px;
-  color: #666;
-}
+  .gradient-header {
+    background: var(--gradient-header);
+  }
 
-.empty-state {
-  text-align: center;
-  padding: 60px 20px;
-  color: #888;
-}
+  .animate-pulse-glow {
+    animation: pulseGlow 2s ease-in-out infinite;
+  }
 
-.empty-state-icon {
-  font-size: 64px;
-  color: #ddd;
-  margin-bottom: 16px;
-}
+  @keyframes pulseGlow {
+    0%, 100% {
+      box-shadow: 0 0 10px hsl(187 100% 50% / 0.2);
+    }
+    50% {
+      box-shadow: 0 0 25px hsl(187 100% 50% / 0.4);
+    }
+  }
 
-/* Custom button styles */
-.collect-button {
-  background: linear-gradient(45deg, #1976d2, #1565c0) !important;
-  color: white !important;
-  transition: all 0.3s ease !important;
-}
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
 
-.collect-button:hover {
-  background: linear-gradient(45deg, #1565c0, #0d47a1) !important;
-  transform: translateY(-1px);
-}
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+  }
 
-/* Dashboard grid layout */
-.dashboard-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 24px;
-  padding: 24px;
-}
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
 
-@media (max-width: 768px) {
-  .dashboard-grid {
-    grid-template-columns: 1fr;
-    padding: 16px;
-    gap: 16px;
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 3px;
   }
 }
