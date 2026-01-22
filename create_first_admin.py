@@ -18,9 +18,7 @@ async def init_data():
         username="Admin",
         email="admin@vinfast.vn",
         password="admin123", # Password này chưa hash (để test)
-        plan="Enterprise",
         role="admin",        # Quan trọng: set quyền admin
-        keywords=["VinFast", "VF8", "VFe34", "Phạm Nhật Vượng"]
     )
     
     if result:

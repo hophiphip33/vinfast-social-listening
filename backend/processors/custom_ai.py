@@ -1,128 +1,94 @@
-import os
-import joblib
-import re
+import torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch.nn.functional as F
 from loguru import logger
+import os
 
-# --- 1. MOCK DATA PROCESSOR (Để tránh lỗi thiếu file DataProcessor) ---
-# Nếu bạn đã có file backend/processors/data_processor.py thì có thể xóa class này
-# và uncomment dòng import bên dưới.
-# from backend.processors.data_processor import DataProcessor
-
-class DataProcessor:
-    @staticmethod
-    def clean_text(text: str) -> str:
-        """Hàm làm sạch text đơn giản nếu chưa có module riêng"""
-        if not text: return ""
-        text = text.lower()
-        text = re.sub(r'http\S+', '', text) # Xóa link
-        text = re.sub(r'[^\w\s]', '', text) # Xóa ký tự đặc biệt
-        return text.strip()
-
-# --- 2. CLASS MODEL CỦA BẠN (Đã tối ưu) ---
 class CustomSentimentModel:
     _instance = None
 
     def __new__(cls, *args, **kwargs):
-        # Singleton Pattern: Đảm bảo chỉ load model 1 lần duy nhất
         if cls._instance is None:
             cls._instance = super(CustomSentimentModel, cls).__new__(cls)
             cls._instance._initialized = False
         return cls._instance
 
-    def __init__(self, model_dir="backend/models"):
+    def __init__(self):
         if self._initialized:
             return
             
+        self.tokenizer = None
         self.model = None
-        self.vectorizer = None
-        self.model_dir = model_dir
+        # Tên model trên HuggingFace hoặc đường dẫn folder local
+        self.model_name = "wonrax/phobert-base-vietnamese-sentiment" 
         self._load_models()
         self._initialized = True
 
     def _load_models(self):
-        """Load model và vectorizer từ file .pkl"""
         try:
-            # Lấy đường dẫn tuyệt đối
-            base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            # Điều chỉnh path trỏ về folder models
-            model_folder = os.path.join(base_path, "models")
+            logger.info(f"🔄 Đang load PhoBERT từ {self.model_name}...")
+            # Load Tokenizer và Model từ HuggingFace
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name)
             
-            model_path = os.path.join(model_folder, "model.pkl")
-            vectorizer_path = os.path.join(model_folder, "vectorizer.pkl")
-
-            if not os.path.exists(model_path) or not os.path.exists(vectorizer_path):
-                logger.warning(f"⚠️ Không tìm thấy model tại: {model_path}")
-                return
-
-            logger.info(f"🔄 Đang load AI Model từ {model_path}...")
-            self.model = joblib.load(model_path)
-            self.vectorizer = joblib.load(vectorizer_path)
-            logger.info("✅ Load AI Model thành công!")
+            # Chuyển sang chế độ eval (không train)
+            self.model.eval() 
+            logger.info("✅ Load PhoBERT thành công!")
             
         except Exception as e:
-            logger.error(f"❌ Lỗi khi load model: {e}")
+            logger.error(f"❌ Lỗi khi load PhoBERT: {e}")
 
     def predict(self, text: str) -> float:
-        """Trả về điểm số từ -1.0 đến 1.0"""
-        if not self.model or not self.vectorizer:
+        if not self.model or not self.tokenizer:
             return 0.0
         
-        if not text or len(text.strip()) == 0:
+        if not text or len(str(text).strip()) == 0:
             return 0.0
 
         try:
-            # Dùng class DataProcessor giả lập ở trên hoặc import thật
-            clean_text = DataProcessor.clean_text(text)
-            text_vector = self.vectorizer.transform([clean_text])
+            # 1. Tokenize văn bản
+            inputs = self.tokenizer(
+                text, 
+                return_tensors="pt", 
+                truncation=True, 
+                max_length=256, 
+                padding=True
+            )
+
+            # 2. Dự đoán (Forward pass)
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                probs = F.softmax(outputs.logits, dim=1)
             
-            # Tính toán xác suất
-            if hasattr(self.model, "predict_proba"):
-                probs = self.model.predict_proba(text_vector)[0]
-                classes = self.model.classes_
-                
-                neg_idx = -1
-                pos_idx = -1
-                
-                # Tìm index của nhãn NEG và POS
-                for i, label in enumerate(classes):
-                    lbl_str = str(label).upper()
-                    if "NEG" in lbl_str or lbl_str == "-1": neg_idx = i
-                    if "POS" in lbl_str or lbl_str == "1": pos_idx = i
-                
-                neg_prob = probs[neg_idx] if neg_idx != -1 else 0.0
-                pos_prob = probs[pos_idx] if pos_idx != -1 else 0.0
-                
-                # Score = Positive - Negative
-                score = pos_prob - neg_prob
-                return float(score)
-            else:
-                # Fallback nếu model không hỗ trợ predict_proba
-                pred = self.model.predict(text_vector)[0]
-                return 1.0 if str(pred) == "POS" else -1.0
+            # 3. Xử lý kết quả (NEG, POS, NEU)
+            # Model 'wonrax/phobert-base-vietnamese-sentiment' thường có thứ tự: [NEG, POS, NEU] hoặc [NEG, NEU, POS]
+            # Cần kiểm tra config id2label của model cụ thể. 
+            # Giả sử model này output 3 lớp: 0: Negative, 1: Positive, 2: Neutral
+            
+            scores = probs[0].tolist()
+            neg_score = scores[0]
+            pos_score = scores[1]
+            # neu_score = scores[2] 
+
+            # Tính điểm tổng hợp: Positive - Negative
+            final_score = pos_score - neg_score
+            
+            return float(final_score)
 
         except Exception as e:
-            logger.error(f"Lỗi dự đoán: {e}")
+            logger.error(f"Lỗi dự đoán PhoBERT: {e}")
             return 0.0
 
-# --- 3. HÀM WRAPPER (Cầu nối cho Main.py) ---
-# Đây là hàm mà main.py đang tìm kiếm
+# Wrapper function
 def analyze_sentiment(text: str):
-    """
-    Hàm này được gọi từ main.py.
-    Nó khởi tạo class CustomSentimentModel và trả về định dạng chuẩn.
-    """
-    model_instance = CustomSentimentModel()
-    score = model_instance.predict(text)
+    model = CustomSentimentModel()
+    score = model.predict(text)
     
-    # Quy đổi điểm số ra Nhãn (Label) để hiển thị
-    if score > 0.1:
+    if score > 0.15:
         label = "Positive"
-    elif score < -0.1:
+    elif score < -0.15:
         label = "Negative"
     else:
         label = "Neutral"
         
-    return {
-        "label": label,
-        "score": score
-    }
+    return {"label": label, "score": score}

@@ -43,7 +43,7 @@ const AdminLayout = () => {
       const res = await fetch(`${API_URL}/api/change-password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ old_password: passForm.old_password, new_password: passForm.new_password })
+        body: JSON.stringify({ current_password: passForm.old_password, new_password: passForm.new_password })
       });
       if (res.ok) {
         toast.success('Đổi mật khẩu thành công!');

@@ -59,7 +59,8 @@ async def run_async_pipeline():
                     keywords=keywords,
                     brand_name=brand_name,
                     blacklist=blacklist,
-                    api_keys=api_keys
+                    api_keys=api_keys,
+                    user_email=user.get("email")
                 )
                 total_youtube_videos += count
             except Exception as e:

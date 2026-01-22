@@ -2,7 +2,11 @@ import { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { FileText, ThumbsUp, ThumbsDown, Heart, Clock, TrendingUp, Youtube, Newspaper, Globe, Loader2, AlertCircle } from 'lucide-react';
+import { Button } from '@/components/ui/button'; // [MỚI] Thêm Button
+import { 
+  FileText, ThumbsUp, ThumbsDown, Heart, Clock, TrendingUp, 
+  Youtube, Newspaper, Globe, Loader2, AlertCircle, Download // [MỚI] Thêm icon Download
+} from 'lucide-react';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend,
@@ -85,6 +89,53 @@ const UserDashboard = () => {
   const [sentimentSource, setSentimentSource] = useState<'all' | 'news' | 'youtube'>('all');
   const [sentimentChartData, setSentimentChartData] = useState<any[]>([]);
   const [sourceDistribution, setSourceDistribution] = useState<any[]>([]);
+
+  // --- [MỚI] HÀM XỬ LÝ EXPORT ---
+  const handleExport = async () => {
+    try {
+      const token = localStorage.getItem('auth_token');
+      if (!token) {
+        toast.error("Vui lòng đăng nhập để thực hiện chức năng này");
+        return;
+      }
+
+      // Thông báo đang xử lý
+      const toastId = toast.loading("Đang chuẩn bị file báo cáo...");
+
+      // Gọi API Export
+      const queryParams = new URLSearchParams({
+        platform: "all",
+        sentiment: "all",
+        search: ""
+      });
+
+      const res = await fetch(`${API_URL}/api/posts/export?${queryParams}`, {
+        method: "GET",
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+
+      if (!res.ok) throw new Error('Lỗi khi xuất file');
+
+      // Tải file về
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `Veda_Dashboard_Report_${new Date().toISOString().slice(0,10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      
+      // Thông báo thành công
+      toast.dismiss(toastId);
+      toast.success("Đã xuất báo cáo CSV thành công!");
+
+    } catch (error) {
+      console.error(error);
+      toast.dismiss();
+      toast.error("Không thể xuất báo cáo. Vui lòng thử lại.");
+    }
+  };
 
   // --- 1. FETCH DATA TỪ API ---
   const fetchData = async () => {
@@ -200,13 +251,23 @@ const UserDashboard = () => {
   return (
     <div className="space-y-6 animate-fade-in">
       {/* Header */}
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
           <h1 className="text-2xl font-bold">Tổng quan</h1>
           <p className="text-muted-foreground">Thống kê dữ liệu Social Listening của bạn</p>
         </div>
-        <div className="text-xs text-muted-foreground bg-secondary px-3 py-1 rounded-full">
-          Cập nhật: {new Date().toLocaleTimeString()}
+        
+        {/* [MỚI] Khu vực Action Buttons */}
+        <div className="flex items-center gap-3">
+            <div className="text-xs text-muted-foreground bg-secondary px-3 py-1.5 rounded-full hidden sm:block">
+                Cập nhật: {new Date().toLocaleTimeString()}
+            </div>
+            
+            <Button onClick={handleExport} variant="outline" className="gap-2 border-green-600 text-green-700 hover:bg-green-50">
+                <Download className="h-4 w-4" />
+                <span className="hidden sm:inline">Xuất Báo cáo</span>
+                <span className="sm:hidden">CSV</span>
+            </Button>
         </div>
       </div>
 

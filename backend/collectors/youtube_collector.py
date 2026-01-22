@@ -26,7 +26,7 @@ if root_dir not in sys.path:
 from backend.database.connection import DatabaseOperations, db_manager 
 from backend.config.settings import settings
 from backend.processors.custom_ai import CustomSentimentModel 
-
+from backend.services.email_service import send_crisis_alert_email
 from yt_dlp import YoutubeDL
 from loguru import logger
 import google.generativeai as genai
@@ -208,7 +208,7 @@ async def get_video_details_and_save(db_ops, url, sentiment_model, brand_name, v
         'skip_download': True,
         'getcomments': True,
         'ignoreerrors': True,
-        'extractor_args': {'youtube': {'max_comments': ['50'], 'comment_sort': ['top']}},
+        'extractor_args': {'youtube': {'max_comments': ['30'], 'comment_sort': ['top']}},
     }
 
     try:
@@ -358,12 +358,13 @@ async def get_video_details_and_save(db_ops, url, sentiment_model, brand_name, v
     logger.info(f"✅ Saved: {info.get('title', '')[:20]}... | MktScore: {marketing_score} | ViewImpact: {round(view_factor, 1)} | Decay: {round(time_decay, 3)}")
     return True
 
-async def search_and_collect_videos(keywords: List[str] = None, brand_name: str = None, blacklist: List[str] = [], api_keys: List[str] = []):
+async def search_and_collect_videos(keywords: List[str] = None, brand_name: str = None, blacklist: List[str] = [], api_keys: List[str] = [], user_email: str = None):
     """
     Hàm chính [CẬP NHẬT]:
     - blacklist: Danh sách từ khóa cấm để lọc video.
     - api_keys: Danh sách key API để chọn ngẫu nhiên cho Gemini.
     """
+    
     if not keywords or not brand_name:
         logger.warning("⚠️ Thiếu Keywords hoặc Brand Name. Bỏ qua thu thập YouTube.")
         return 0
@@ -475,7 +476,35 @@ async def search_and_collect_videos(keywords: List[str] = None, brand_name: str 
             success = await get_video_details_and_save(db_ops, vid['url'], sentiment_model, brand_name, vid)
             if success: count += 1
         except: continue
-        
+    count = 0
+    negative_posts_buffer = [] # [MỚI] Danh sách chứa bài viết tiêu cực
+    
+    for vid in top_videos:
+        if await db_ops.get_post_by_url(vid['url']): 
+            continue
+        try:
+            # Nhận kết quả trả về từ hàm con
+            post_result = await get_video_details_and_save(db_ops, vid['url'], sentiment_model, brand_name, vid)
+            
+            if post_result: 
+                count += 1
+                # [LOGIC MỚI] Kiểm tra tiêu cực để cảnh báo
+                # Điều kiện: Là NEGATIVE VÀ điểm Marketing Score > 4 (để tránh báo video rác ít view)
+                if post_result.get('sentiment') == 'NEGATIVE' and post_result.get('marketing_score', 0) > 4:
+                    negative_posts_buffer.append(post_result)
+                    
+        except Exception as e: 
+            logger.error(f"Lỗi xử lý video {vid['url']}: {e}")
+            continue
+
+    # [LOGIC MỚI] Gửi email cảnh báo nếu có bài tiêu cực
+    if user_email and negative_posts_buffer:
+        logger.warning(f"⚠️ Phát hiện {len(negative_posts_buffer)} bài viết tiêu cực cho {brand_name}. Đang gửi mail...")
+        await send_crisis_alert_email(
+            to_email=user_email,
+            brand_name=brand_name,
+            negative_posts=negative_posts_buffer
+        )    
     return count
 
 async def main():

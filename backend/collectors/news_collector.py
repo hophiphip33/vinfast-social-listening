@@ -1,6 +1,6 @@
 """
-News Collector - Dynamic Version
-Strategy: RSS Parser -> Dynamic Filter (User Keywords & Brand & Blacklist) -> AI Analysis -> DB Save
+News Collector - Optimized Version
+Features: Google News RSS + Concurrency + Robust Date Parsing + Safe Timezone
 """
 
 import os
@@ -8,396 +8,391 @@ import sys
 import asyncio
 import json
 import concurrent.futures
-import random  # [MỚI] Thêm thư viện random để chọn API Key
-from datetime import datetime, timedelta
+import random
+import urllib.parse
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict
-import feedparser
+import re
 
-# --- FIX LỖI IMPORT ---
+# Thư viện ngoài
+import feedparser
+from dateutil import parser as date_parser
+from newspaper import Article, Config
+from loguru import logger
+import google.generativeai as genai
+
+# --- FIX IMPORT ---
+# Đảm bảo Python tìm thấy module backend dù chạy từ đâu
 current_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.abspath(os.path.join(current_dir, "../../"))
 if root_dir not in sys.path:
     sys.path.append(root_dir)
 
-# --- IMPORT MODULES ---
 from backend.database.connection import DatabaseOperations, db_manager 
 from backend.config.settings import settings
 from backend.processors.custom_ai import CustomSentimentModel
 from backend.processors.data_processor import data_processor 
 
-from newspaper import Article, Config
-from loguru import logger
-import google.generativeai as genai
-
-# --- CẤU HÌNH GEMINI (MẶC ĐỊNH) ---
-# Biến global để lưu model hiện tại
+# --- CONFIG ---
 gemini_model = None
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
-# Hàm khởi tạo Gemini mặc định (nếu không có key động)
+# Khởi tạo Sentiment Model MỘT LẦN DUY NHẤT để tiết kiệm RAM
+try:
+    GLOBAL_SENTIMENT_MODEL = CustomSentimentModel()
+except Exception:
+    GLOBAL_SENTIMENT_MODEL = None
+
+# --- INIT GEMINI ---
 def init_default_gemini():
     global gemini_model
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-    if not GEMINI_API_KEY:
-        if hasattr(settings, 'GEMINI_API_KEYS') and settings.GEMINI_API_KEYS:
-            GEMINI_API_KEY = settings.GEMINI_API_KEYS[0]
+    if not GEMINI_API_KEY and hasattr(settings, 'GEMINI_API_KEYS') and settings.GEMINI_API_KEYS:
+        GEMINI_API_KEY = settings.GEMINI_API_KEYS[0]
     
     if GEMINI_API_KEY:
         try:
             genai.configure(api_key=GEMINI_API_KEY)
-            gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+            gemini_model = genai.GenerativeModel('gemini-1.5-flash')
         except Exception as e:
-            logger.error(f"Lỗi cấu hình Gemini mặc định: {e}")
+            logger.error(f"Gemini Init Error: {e}")
 
-# Gọi khởi tạo lần đầu
 init_default_gemini()
 
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
-
-# ==============================================================================
-# DANH SÁCH NGUỒN TIN RSS
-# ==============================================================================
+# --- STATIC SOURCES ---
 RSS_SOURCES = [
     {"name": "VnExpress - Kinh Doanh", "rss_url": "https://vnexpress.net/rss/kinh-doanh.rss", "category": "Kinh Doanh"},
     {"name": "VnExpress - Xe", "rss_url": "https://vnexpress.net/rss/oto-xe-may.rss", "category": "Xe"},
     {"name": "Dân Trí - Kinh Doanh", "rss_url": "https://dantri.com.vn/kinh-doanh.rss", "category": "Kinh Doanh"},
-    {"name": "Tuổi Trẻ - Kinh Doanh", "rss_url": "https://tuoitre.vn/rss/kinh-doanh.rss", "category": "Kinh Doanh"},
-    {"name": "Thanh Niên - Kinh Doanh", "rss_url": "https://thanhnien.vn/rss/kinh-doanh.rss", "category": "Kinh Doanh"},
-    {"name": "CafeF", "rss_url": "https://cafef.vn/tai-chinh-kinh-doanh.rss", "category": "Tài chính"}
+    {"name": "CafeF", "rss_url": "https://cafef.vn/tai-chinh-kinh-doanh.rss", "category": "Tài chính"},
+    {"name": "Thanh Niên - Tài Chính", "rss_url": "https://thanhnien.vn/rss/tai-chinh-kinh-doanh.rss", "category": "Kinh Doanh"}
 ]
 
 # ==============================================================================
-# 1. RSS PARSER & DYNAMIC FILTER
+# 1. HELPER: DYNAMIC SOURCES & FILTER
 # ==============================================================================
 
-def is_relevant_article(title, summary, keywords: List[str], brand_name: str, blacklist: List[str] = []):
+def get_dynamic_sources(keywords: List[str]):
+    """Tạo nguồn tin động từ Google News dựa trên từ khóa"""
+    sources = list(RSS_SOURCES)
+    if keywords:
+        # Query: ("VinFast" OR "VF8") when:3d (lấy tin trong 3 ngày)
+        # Sử dụng quote_plus để mã hóa URL an toàn
+        query = " OR ".join([f'"{k}"' for k in keywords])
+        encoded_query = urllib.parse.quote(query)
+        
+        # hl=vi: ngôn ngữ Việt, gl=VN: khu vực VN, ceid=VN:vi
+        google_rss = f"https://news.google.com/rss/search?q={encoded_query}+when:3d&hl=vi&gl=VN&ceid=VN:vi"
+        
+        sources.append({
+            "name": "Google News Aggregator",
+            "rss_url": google_rss,
+            "category": "Aggregator"
+        })
+    return sources
+
+def is_relevant_article(title, summary, keywords, brand_name, blacklist):
     """
-    Kiểm tra bài báo có liên quan không.
-    [CẬP NHẬT] Thêm logic kiểm tra Blacklist.
+    Bộ lọc bài viết: Blacklist -> Brand -> Keywords
     """
-    import re
-    
-    # Gộp title và summary để check
     text = f"{title} {summary}".lower()
     
-    # 0. [MỚI] Check Blacklist (Ưu tiên cao nhất - Loại bỏ rác)
+    # 1. Check Blacklist (Critical)
     if blacklist:
         for bad_word in blacklist:
-            # Nếu từ khóa chặn xuất hiện -> Loại ngay
-            if bad_word in text:
-                return False
+            if bad_word.lower() in text: return False
     
-    # 1. Remove URLs
-    text = re.sub(r'http\S+|www\S+', '', text)
-    
-    # 2. Check Brand Name (Ưu tiên tiếp theo)
-    if brand_name and brand_name.lower() in text:
-        return True
+    # 2. Check Brand (Ưu tiên cao)
+    if brand_name and brand_name.lower() in text: return True
 
-    # 3. Check Keywords (Dynamic)
+    # 3. Check Keywords
     if keywords:
-        for keyword in keywords:
-            # Dùng word boundary (\b) để khớp chính xác từ
-            pattern = r'\b' + re.escape(keyword.lower()) + r'\b'
-            if re.search(pattern, text):
+        for kw in keywords:
+            # Regex check boundary: \bword\b để tránh match nhầm
+            # re.IGNORECASE để không phân biệt hoa thường
+            if re.search(r'\b' + re.escape(kw) + r'\b', text, re.IGNORECASE):
+                return True
+            if kw.lower() in text: # Fallback simple check
                 return True
             
-            # Fallback
-            if " " in keyword:
-                if keyword.lower() in text:
-                    return True
-    
     return False
 
-def fetch_rss_articles_sync(source, keywords, brand_name, blacklist):
-    """
-    Parse RSS feed và filter theo keywords + brand_name + blacklist
-    """
-    if not keywords and not brand_name:
-        return []
+# ==============================================================================
+# 2. FETCHING LOGIC
+# ==============================================================================
 
+def fetch_rss_articles_sync(source, keywords, brand_name, blacklist):
     try:
-        feed = feedparser.parse(source['rss_url'])
-        if not feed.entries:
-            return []
+        # Thêm User-Agent để tránh bị chặn bởi một số RSS Server
+        feed = feedparser.parse(source['rss_url'], agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
         
-        filtered_articles = []
+        if not feed.entries: return []
+        
+        filtered = []
+        now = datetime.now()
         
         for entry in feed.entries:
             title = entry.get('title', '')
             summary = entry.get('summary', '')
             link = entry.get('link', '')
             
-            # --- LOGIC LỌC ĐỘNG (Đã update thêm blacklist) ---
+            # Lọc nội dung
             if not is_relevant_article(title, summary, keywords, brand_name, blacklist):
                 continue
             
-            # Parse date
-            pub_date = datetime.now()
-            if hasattr(entry, 'published_parsed') and entry.published_parsed:
+            # --- XỬ LÝ NGÀY THÁNG (QUAN TRỌNG) ---
+            pub_date = now
+            date_str = entry.get('published') or entry.get('updated') or entry.get('created')
+            
+            if date_str:
                 try:
-                    pub_date = datetime(*entry.published_parsed[:6])
-                except:
+                    # Parse ngày tháng
+                    dt = date_parser.parse(date_str)
+                    
+                    # Chuyển đổi về navie datetime (bỏ múi giờ) để thống nhất so sánh
+                    if dt.tzinfo:
+                        pub_date = dt.astimezone(timezone.utc).replace(tzinfo=None)
+                    else:
+                        pub_date = dt
+                except: 
                     pass
             
-            # Chỉ lấy bài trong 7 ngày
-            if (datetime.now() - pub_date).days <= 7:
-                filtered_articles.append({
-                    'title': title,
-                    'link': link,
+            # Chỉ lấy tin trong 3 ngày đổ lại
+            if (now - pub_date).days <= 3:
+                filtered.append({
+                    'title': title, 
+                    'link': link, 
                     'summary': summary,
-                    'published_date': pub_date,
+                    'published_date': pub_date, 
                     'source_name': source['name'],
-                    'category': source['category'],
-                    'matched_brand': brand_name
+                    'category': source['category']
                 })
-        
-        return filtered_articles
-        
+        return filtered
     except Exception as e:
-        logger.error(f"❌ Error RSS {source['name']}: {e}")
+        logger.error(f"RSS Error {source['name']}: {e}")
         return []
 
 async def fetch_rss_articles(source, keywords, brand_name, blacklist):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(executor, fetch_rss_articles_sync, source, keywords, brand_name, blacklist)
 
-# ==============================================================================
-# 2. NEWSPAPER3K PARSER
-# ==============================================================================
-
 def fetch_full_article_sync(url):
+    """
+    Dùng Newspaper3k để tải nội dung chi tiết bài báo
+    """
     try:
         config = Config()
-        config.browser_user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        config.request_timeout = 15
-        config.fetch_images = False
-        config.memoize_articles = False
-
+        config.browser_user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+        config.request_timeout = 10
+        
         article = Article(url, config=config)
         article.download()
         article.parse()
         
-        if not article.text or len(article.text) < 200:
-            return None
-            
+        # Bỏ qua nếu bài quá ngắn (có thể là lỗi parse hoặc paywall)
+        if not article.text or len(article.text) < 100: return None
+        
         return {
-            "title": article.title or "No Title",
+            "title": article.title, 
             "text": article.text,
-            "publish_date": article.publish_date,
-            "top_image": article.top_image,
-            "authors": article.authors
+            "top_image": article.top_image, 
+            "authors": article.authors,
+            "publish_date": article.publish_date
         }
-    except Exception as e:
-        return None
+    except: return None
 
 async def fetch_article_content(url):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(executor, fetch_full_article_sync, url)
 
 # ==============================================================================
-# 3. GEMINI AI ANALYSIS
+# 3. ANALYSIS & SAVING
 # ==============================================================================
-
-def gemini_analyze_news_sync(text, brand_name=""):
-    if not text or not gemini_model: return {"summary": None}
-    
-    try:
-        text_input = text[:30000] 
-        prompt = f"""
-Phân tích bài báo sau liên quan đến thương hiệu "{brand_name}".
-Trả về JSON (KHÔNG markdown):
-{{
-    "summary": "<Tóm tắt 3-4 câu>",
-    "risk_analysis": "<Tích cực/Tiêu cực/Trung tính>",
-    "key_topics": ["<Chủ đề 1>", "<Chủ đề 2>"],
-    "sentiment_explanation": "<Giải thích ngắn>"
-}}
-Bài báo:
-{text_input}
-"""
-        response = gemini_model.generate_content(prompt)
-        result_text = response.text.strip()
-        if result_text.startswith("```"):
-            result_text = result_text.strip("`").replace("json", "").strip()
-        return json.loads(result_text)
-    except Exception:
-        return {"summary": None}
-
-def fallback_summarize(text, max_sentences=4):
-    import re
-    sentences = re.split(r'[.!?]\s+', text)
-    valid_sentences = [s.strip() for s in sentences if 20 < len(s) < 200]
-    if not valid_sentences: return text[:500]
-    return ". ".join(valid_sentences[:max_sentences]) + "."
 
 async def gemini_analyze_news(text, brand_name):
+    """Gọi Gemini để phân tích nội dung"""
+    if not gemini_model: return {}
     loop = asyncio.get_running_loop()
-    if not gemini_model: return {"summary": None}
-    await asyncio.sleep(2)
-    return await loop.run_in_executor(executor, gemini_analyze_news_sync, text, brand_name)
+    
+    def _call():
+        try:
+            prompt = f"""
+            Bạn là chuyên gia phân tích truyền thông. Hãy phân tích bài viết dưới đây về thương hiệu "{brand_name}".
+            
+            Trả về kết quả dưới dạng JSON hợp lệ (không Markdown) với cấu trúc sau:
+            {{
+                "summary": "Tóm tắt ngắn gọn 3 câu chính, tập trung vào tác động tới thương hiệu.",
+                "risk_analysis": "Đánh giá là: TÍCH CỰC, TIÊU CỰC, hay TRUNG TÍNH.",
+                "key_topics": ["Chủ đề 1", "Chủ đề 2"],
+                "sentiment_explanation": "Giải thích ngắn gọn tại sao lại đánh giá như vậy."
+            }}
+            
+            Nội dung bài viết:
+            {text[:15000]}
+            """
+            res = gemini_model.generate_content(prompt)
+            # Làm sạch chuỗi JSON nếu Gemini trả về markdown
+            clean_text = res.text.replace("```json", "").replace("```", "").strip()
+            return json.loads(clean_text)
+        except Exception as e: 
+            return {}
 
-# ==============================================================================
-# 4. PROCESS & SAVE
-# ==============================================================================
+    return await loop.run_in_executor(executor, _call)
 
 async def process_and_save_article(db_ops, article_meta, sentiment_model, brand_name):
-    url = article_meta.get('link')
+    url = article_meta['link']
     
-    # Check duplicate
-    existing = await db_ops.get_post_by_url(url)
-    if existing: return False
+    # 1. Check duplicate nhanh (tránh tốn AI token)
+    if await db_ops.get_post_by_url(url): return False
     
-    content_data = await fetch_article_content(url)
-    if not content_data: return False
-        
-    full_text = content_data['text']
-    title = content_data['title'] or article_meta.get('title')
+    # 2. Fetch Content
+    content = await fetch_article_content(url)
+    if not content: return False
+    
+    full_text = content['text']
+    title = content['title'] or article_meta['title']
+    
+    # 3. Parallel Analysis (AI + Sentiment)
+    ai_data = await gemini_analyze_news(f"{title}\n{full_text}", brand_name)
+    
+    # 4. Scoring Logic
+    # Sentiment Model trả về từ -1 đến 1
+    sentiment_score = 0
+    if sentiment_model:
+        sentiment_score = sentiment_model.predict(f"{title}. {full_text[:1000]}")
+    
+    # AI Risk Analysis -> Score
+    risk_text = ai_data.get('risk_analysis', '').lower()
+    ai_score_val = 0.8 if 'tích cực' in risk_text or 'positive' in risk_text else \
+                   -0.8 if 'tiêu cực' in risk_text or 'negative' in risk_text else 0.0
+    
+    # Weighted Average: 60% Model NLP + 40% Gemini AI
+    final_score = (0.6 * sentiment_score) + (0.4 * ai_score_val)
+    
+    # Labeling
+    sentiment_label = "NEUTRAL"
+    if final_score > 0.15: sentiment_label = "POSITIVE"
+    if final_score < -0.15: sentiment_label = "NEGATIVE"
 
-    # AI Insights
-    ai_insights = await gemini_analyze_news(f"{title}\n\n{full_text}", brand_name)
-    
-    if ai_insights.get('summary'):
-        summary = ai_insights['summary']
-        summary_method = "Gemini"
-    else:
-        summary = fallback_summarize(full_text)
-        summary_method = "Extractive"
+    # Tính Marketing Score (Thang 10)
+    # final_score (-1 -> 1) => Marketing Score (0 -> 10)
+    # Công thức sigmoid-like đơn giản
+    marketing_score = round(min(10, max(0, (final_score + 1) * 5)), 1)
 
-    # Sentiment Analysis
-    content_text = f"{title}. {article_meta.get('summary', '')} {full_text[:2000]}"
-    content_score = sentiment_model.predict(content_text)
-    
-    risk_analysis = ai_insights.get('risk_analysis', '').lower()
-    ai_score = 0.7 if 'tích cực' in risk_analysis or 'positive' in risk_analysis else \
-               -0.7 if 'tiêu cực' in risk_analysis or 'negative' in risk_analysis else 0.0
-    
-    # Keyword Score
-    keywords_found = data_processor.extract_keywords(full_text)
-    
-    final_score = max(-1.0, min(1.0, (0.6 * content_score) + (0.3 * ai_score)))
-    sentiment_label = "positive" if final_score > 0.15 else "negative" if final_score < -0.15 else "neutral"
-
-    # Prepare Data
-    post_data = {
+    # 5. Save to DB
+    doc = {
         "platform": "news",
         "source_url": url,
-        "source_name": article_meta.get('source_name', 'Unknown'),
+        "source_name": article_meta['source_name'],
         "title": title,
-        "thumbnail_url": content_data.get('top_image'),
-        "content": summary,
-        "full_text": full_text[:5000],
-        "author": ', '.join(content_data.get('authors', [])) if content_data.get('authors') else None,
-        "views_count": 0, "likes_count": 0, "comments_count": 0,
-        "published_at": content_data.get('publish_date') or article_meta.get('published_date') or datetime.now(),
+        # Ưu tiên tóm tắt của AI, nếu lỗi thì cắt text
+        "content": ai_data.get('summary') or full_text[:300] + "...",
+        "full_text": full_text[:5000], # Lưu tối đa 5000 ký tự để tiết kiệm DB
+        "thumbnail_url": content['top_image'],
+        "published_at": content['publish_date'] or article_meta['published_date'],
         "collected_at": datetime.now(),
-        "is_processed": True,
-        "language": "vi",
+        
         "sentiment": sentiment_label,
         "sentiment_score": round(final_score, 3),
-        "ai_sentiment_raw": round(content_score, 3),
-        "crowd_sentiment": round(ai_score, 3),
-        "keywords": keywords_found[:10],
-        "brand_name": brand_name, 
+        "marketing_score": marketing_score,
+        
+        "brand_name": brand_name,
+        "keywords": data_processor.extract_keywords(full_text)[:5] if data_processor else [],
         "extra_data": {
-            "category": article_meta.get('category'),
-            "summary_method": summary_method,
-            "marketing_score": round(final_score * 100, 2),
-            "topics": ai_insights.get('key_topics', [])
-        }
+            "topics": ai_data.get('key_topics', []),
+            "ai_explanation": ai_data.get('sentiment_explanation', '')
+        },
+        # Các trường mặc định cho thống kê
+        "views_count": 0,
+        "likes_count": 0,
+        "comments_count": 0,
+        "shares_count": 0,
+        "is_processed": True
     }
-
-    try:
-        await db_ops.insert_post(post_data)
-        logger.info(f"💾 Saved: {title[:30]}... | Brand: {brand_name}")
-        return True
-    except Exception as e:
-        logger.error(f"Save error: {e}")
-        return False
-
-# ==============================================================================
-# 5. MAIN WORKFLOW (UPDATED)
-# ==============================================================================
-
-async def search_and_collect_news(keywords: List[str] = None, brand_name: str = None, blacklist: List[str] = [], api_keys: List[str] = []):
-    """
-    Hàm chính [CẬP NHẬT]:
-    - blacklist: Danh sách từ khóa cấm (được truyền từ run_collector)
-    - api_keys: Danh sách key API (được truyền từ run_collector)
-    """
-    if not keywords or not brand_name:
-        logger.warning("⚠️ Thiếu Keywords hoặc Brand Name. Bỏ qua thu thập News.")
-        return 0
-
-    db_ops = DatabaseOperations()
     
-    # --- [MỚI] CẤU HÌNH API KEY ĐỘNG ---
+    await db_ops.insert_post(doc)
+    logger.info(f"📰 Saved: {title[:30]}... [{sentiment_label} - {marketing_score}]")
+    return True
+
+# ==============================================================================
+# 4. MAIN ORCHESTRATOR
+# ==============================================================================
+
+async def search_and_collect_news(keywords, brand_name, blacklist=[], api_keys=[]):
+    if not keywords: return 0
+    
+    # 1. Config Dynamic Key (Cấu hình lại Gemini nếu có key mới)
     global gemini_model
     if api_keys:
         try:
-            # Chọn ngẫu nhiên 1 key trong danh sách để cân bằng tải
-            selected_key = random.choice(api_keys)
-            genai.configure(api_key=selected_key)
+            # Random key để load balancing
+            key = random.choice(api_keys)
+            genai.configure(api_key=key)
             gemini_model = genai.GenerativeModel('gemini-1.5-flash')
-        except Exception as e:
-            logger.warning(f"⚠️ Lỗi cấu hình Dynamic Key: {e}. Dùng key mặc định.")
-    
-    logger.info("🤖 Loading AI Model...")
-    try:
-        sentiment_model = CustomSentimentModel()
-    except Exception:
-        return 0
+        except: 
+            pass # Giữ nguyên model cũ nếu lỗi cấu hình
 
-    total_saved = 0
-    all_articles = []
+    db_ops = DatabaseOperations()
     
-    logger.info(f"📡 Quét tin tức cho Brand: {brand_name} | Keywords: {keywords} | Blacklist: {len(blacklist)} từ")
-    
-    # Truyền blacklist vào các hàm fetch RSS
-    tasks = [fetch_rss_articles(source, keywords, brand_name, blacklist) for source in RSS_SOURCES]
-    results = await asyncio.gather(*tasks)
-    
-    for articles in results:
-        all_articles.extend(articles)
-    
-    logger.info(f"✅ Tìm thấy {len(all_articles)} bài viết sạch (đã lọc rác).")
-    
-    # Deduplicate
-    seen_urls = set()
-    unique_articles = []
-    for article in all_articles:
-        if article['link'] not in seen_urls:
-            seen_urls.add(article['link'])
-            unique_articles.append(article)
-    
-    # Sort & Limit
-    unique_articles.sort(key=lambda x: x['published_date'], reverse=True)
-    articles_to_process = unique_articles[:20] # Lấy 20 bài mới nhất mỗi lần chạy
-    
-    # Process
-    for article in articles_to_process:
-        try:
-            success = await process_and_save_article(db_ops, article, sentiment_model, brand_name)
-            if success: total_saved += 1
-            await asyncio.sleep(0.5)
-        except Exception:
-            continue
-            
-    return total_saved
+    # Sử dụng Global Sentiment Model để tránh load lại nặng RAM
+    sentiment_model = GLOBAL_SENTIMENT_MODEL or CustomSentimentModel()
 
-async def main():
-    # Test chạy độc lập
-    await db_manager.connect()
-    try:
-        await search_and_collect_news(
-            keywords=["VinFast", "VF8"], 
-            brand_name="VinFast",
-            blacklist=["xổ số", "game bài"],  # Test blacklist
-            api_keys=[] # Test default key
-        )
-    finally:
-        await db_manager.disconnect()
+    # 2. Gather URLs from RSS (Bao gồm Google News)
+    sources = get_dynamic_sources(keywords)
+    logger.info(f"📡 Scanning {len(sources)} sources for '{brand_name}'...")
+    
+    rss_tasks = [fetch_rss_articles(s, keywords, brand_name, blacklist) for s in sources]
+    results = await asyncio.gather(*rss_tasks)
+    
+    # 3. Flatten & Deduplicate
+    articles = [item for sublist in results for item in sublist]
+    
+    # Deduplicate by Link (Dùng Dict comprehension)
+    unique_articles_map = {a['link']: a for a in articles}
+    unique_articles = list(unique_articles_map.values())
+    
+    # Sort by Date (Mới nhất trước) & Limit
+    sorted_articles = sorted(unique_articles, key=lambda x: x['published_date'], reverse=True)[:30]
+    
+    logger.info(f"🔍 Processing {len(sorted_articles)} potential articles (from {len(unique_articles)} raw)...")
+
+    # 4. Process in Parallel (Max 5 concurrent để tránh rate limit)
+    sem = asyncio.Semaphore(5)
+    
+    async def _worker(art):
+        async with sem:
+            try:
+                return await process_and_save_article(db_ops, art, sentiment_model, brand_name)
+            except Exception as e:
+                logger.warning(f"Failed processing {art['link']}: {e}")
+                return False
+
+    save_tasks = [_worker(a) for a in sorted_articles]
+    results = await asyncio.gather(*save_tasks)
+    
+    total = sum(1 for r in results if r)
+    if total > 0:
+        logger.success(f"✅ Finished News Collection. Saved {total} new articles for {brand_name}.")
+    else:
+        logger.info(f"💤 News Collection finished. No new valid articles found for {brand_name}.")
+        
+    return total
 
 if __name__ == "__main__":
+    # Test Block
+    async def main():
+        await db_manager.connect()
+        try:
+            await search_and_collect_news(
+                keywords=["VinFast", "Vingroup", "VF3"], 
+                brand_name="VinFast",
+                blacklist=["xổ số", "bóng đá", "tệ nạn"],
+                api_keys=[]
+            )
+        finally:
+            await db_manager.disconnect()
+
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
     asyncio.run(main())

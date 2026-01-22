@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Input } from '@/components/ui/input'; // Import Input
+import { Input } from '@/components/ui/input';
 import { 
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
@@ -13,13 +13,14 @@ import {
 } from '@/components/ui/dialog';
 import { Separator } from '@/components/ui/separator';
 import { 
-    Youtube, Newspaper, RefreshCw, AlertCircle, Clock, 
-    ExternalLink, BarChart3, Bot, ChevronRight, Search, 
-    ChevronLeft, ChevronsLeft, ChevronsRight 
+  Youtube, Newspaper, RefreshCw, AlertCircle, Clock, 
+  ExternalLink, BarChart3, Bot, ChevronRight, Search, 
+  ChevronLeft, ChevronsLeft, ChevronsRight, Download // [THÊM] Import Download
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { formatDistanceToNow } from 'date-fns';
 import { vi } from 'date-fns/locale';
+import { useToast } from '@/components/ui/use-toast'; // [THÊM] Import useToast
 
 // --- CẤU HÌNH API ---
 const API_URL = 'http://localhost:8000';
@@ -50,10 +51,12 @@ const sentimentStyles: Record<string, string> = {
 };
 
 const LiveFeed = () => {
+  const { toast } = useToast(); // [THÊM] Khởi tạo toast
+
   // State bộ lọc
   const [platformFilter, setPlatformFilter] = useState<string>('all');
   const [sentimentFilter, setSentimentFilter] = useState<string>('all');
-  const [searchQuery, setSearchQuery] = useState<string>(''); // State tìm kiếm
+  const [searchQuery, setSearchQuery] = useState<string>(''); 
   
   // State phân trang & Modal
   const [currentPage, setCurrentPage] = useState<number>(1);
@@ -68,8 +71,11 @@ const LiveFeed = () => {
   const { data: posts, isLoading, isError, refetch } = useQuery({
     queryKey: ['live-feed-posts'],
     queryFn: async () => {
-      const token = localStorage.getItem('auth_token');
+      const token = localStorage.getItem('auth_token'); // Lưu ý: Kiểm tra lại key token của bạn là 'auth_token' hay 'token'
       if (!token) throw new Error("Chưa đăng nhập");
+
+      // Lưu ý: Nếu key token trong localStorage là "token" (như ở file Login.tsx thường dùng), hãy sửa lại dòng trên.
+      // Ví dụ: const token = localStorage.getItem('token'); 
 
       const res = await fetch(`${API_URL}/api/dashboard/data`, {
         headers: { 'Authorization': `Bearer ${token}` }
@@ -92,7 +98,53 @@ const LiveFeed = () => {
     refetchInterval: 30000,
   });
 
-  // --- XỬ LÝ LỌC & TÌM KIẾM ---
+  // --- [THÊM] HÀM XỬ LÝ EXPORT ---
+  const handleExport = async () => {
+    try {
+      const token = localStorage.getItem('auth_token') || localStorage.getItem('token'); // Lấy token an toàn hơn
+      
+      // Tạo query string dựa trên state hiện tại
+      const queryParams = new URLSearchParams({
+        platform: platformFilter,
+        sentiment: sentimentFilter,
+        search: searchQuery
+      });
+
+      const response = await fetch(`${API_URL}/api/posts/export?${queryParams}`, {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+        },
+      });
+
+      if (response.ok) {
+        // Tạo blob từ response để tải file
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `Veda_Report_${new Date().toISOString().slice(0,10)}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        
+        toast({
+          title: "Thành công",
+          description: "Đã xuất báo cáo thành công!",
+        });
+      } else {
+        throw new Error("Lỗi khi xuất file");
+      }
+    } catch (error) {
+      toast({
+        variant: "destructive",
+        title: "Lỗi",
+        description: "Không thể xuất báo cáo. Vui lòng thử lại.",
+      });
+    }
+  };
+
+  // --- XỬ LÝ LỌC & TÌM KIẾM (Client-side cho hiển thị) ---
   const filteredPosts = posts?.filter(post => {
     const postPlatform = post.platform.toLowerCase();
     const filterPlatform = platformFilter.toLowerCase();
@@ -216,7 +268,7 @@ const LiveFeed = () => {
           </div>
         </div>
 
-        {/* TOOLBAR: SEARCH & FILTERS */}
+        {/* TOOLBAR: SEARCH & FILTERS & EXPORT */}
         <div className="flex flex-col sm:flex-row gap-3 items-center bg-card p-3 rounded-lg border shadow-sm">
             {/* Search Input */}
             <div className="relative w-full sm:flex-1">
@@ -230,7 +282,7 @@ const LiveFeed = () => {
             </div>
 
             {/* Filters */}
-            <div className="flex gap-2 w-full sm:w-auto">
+            <div className="flex flex-wrap gap-2 w-full sm:w-auto items-center">
                 <Select value={platformFilter} onValueChange={setPlatformFilter}>
                     <SelectTrigger className="w-full sm:w-[130px] bg-background"><SelectValue placeholder="Nguồn" /></SelectTrigger>
                     <SelectContent>
@@ -249,6 +301,17 @@ const LiveFeed = () => {
                     <SelectItem value="neutral">Trung lập</SelectItem>
                     </SelectContent>
                 </Select>
+
+                {/* [THÊM] Nút Xuất Báo Cáo */}
+                <Button 
+                    variant="outline" 
+                    onClick={handleExport}
+                    className="flex items-center gap-2 border-green-600 text-green-700 hover:bg-green-50 w-full sm:w-auto"
+                >
+                    <Download className="h-4 w-4" />
+                    <span className="hidden sm:inline">Xuất CSV</span>
+                    <span className="sm:hidden">Xuất</span>
+                </Button>
             </div>
         </div>
       </div>
