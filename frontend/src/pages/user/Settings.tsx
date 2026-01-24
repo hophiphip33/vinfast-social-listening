@@ -4,23 +4,35 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Switch } from '@/components/ui/switch'; // Đảm bảo đã import Switch
+import { Switch } from '@/components/ui/switch';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { toast } from 'sonner';
-import { Save, Loader2, User, Shield, Lock, KeyRound, Youtube, Newspaper, AlertCircle } from 'lucide-react';
+import { 
+  Save, Loader2, User, Shield, Lock, KeyRound, 
+  Youtube, Newspaper, AlertCircle, RefreshCcw, Clock, CheckCircle2 
+} from 'lucide-react';
 
-const API_URL = 'http://localhost:8000';
+// Sử dụng biến môi trường nếu có, không thì fallback về localhost
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+// Cấu hình thời gian chờ: 1 giờ = 3600 giây
+const COOLDOWN_TIME = 3600; 
+const STORAGE_KEY = 'last_collect_timestamp';
 
 const Settings = () => {
   const queryClient = useQueryClient();
   
-  // 1. State form cấu hình (Bổ sung active_sources)
+  // --- STATE CHO NÚT THU THẬP ---
+  const [isCollecting, setIsCollecting] = useState(false);
+  const [cooldown, setCooldown] = useState(0);
+
+  // --- STATE FORM CẤU HÌNH ---
   const [formData, setFormData] = useState({
     brand_name: '',
     keywords: '',
     email: '',
-    active_sources: { youtube: true, news: true } // Mặc định bật hết
+    active_sources: { youtube: true, news: true }
   });
 
   const [passwordData, setPasswordData] = useState({
@@ -29,7 +41,47 @@ const Settings = () => {
     confirmPassword: ''
   });
 
-  // 2. LẤY DỮ LIỆU USER TỪ API
+  // --- LOGIC ĐẾM NGƯỢC (CLIENT-SIDE) ---
+  useEffect(() => {
+    const lastRun = localStorage.getItem(STORAGE_KEY);
+    if (lastRun) {
+      const lastTime = parseInt(lastRun, 10);
+      const now = Date.now();
+      const diffSeconds = Math.floor((now - lastTime) / 1000);
+      
+      if (diffSeconds < COOLDOWN_TIME) {
+        setCooldown(COOLDOWN_TIME - diffSeconds);
+      } else {
+        localStorage.removeItem(STORAGE_KEY);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    let timer: NodeJS.Timeout;
+    if (cooldown > 0) {
+      timer = setInterval(() => {
+        setCooldown((prev) => {
+          if (prev <= 1) {
+             localStorage.removeItem(STORAGE_KEY);
+             return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }
+    return () => clearInterval(timer);
+  }, [cooldown]);
+
+  const formatTime = (seconds: number) => {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    if (h > 0) return `${h} giờ ${m} phút`;
+    return `${m}:${s < 10 ? '0' : ''}${s}`;
+  };
+
+  // --- API LẤY USER ---
   const { data: userProfile, isLoading, isError, error } = useQuery({
     queryKey: ['user-profile'],
     queryFn: async () => {
@@ -39,7 +91,6 @@ const Settings = () => {
       const res = await fetch(`${API_URL}/api/users/me`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
-      
       if (!res.ok) throw new Error('Không thể tải thông tin user');
       return await res.json();
     }
@@ -51,13 +102,45 @@ const Settings = () => {
         brand_name: userProfile.brand_name || '',
         keywords: userProfile.keywords || '',
         email: userProfile.email || '',
-        // Lấy config từ API, nếu thiếu thì mặc định True
         active_sources: userProfile.active_sources || { youtube: true, news: true }
       });
     }
   }, [userProfile]);
 
-  // 3. API CẬP NHẬT CẤU HÌNH (Sửa lỗi 422 bằng cách gửi đủ active_sources)
+  // --- API KÍCH HOẠT THU THẬP ---
+  const handleTriggerCollect = async () => {
+    if (cooldown > 0) return;
+    setIsCollecting(true);
+    try {
+      const token = localStorage.getItem('auth_token');
+      const res = await fetch(`${API_URL}/api/collect/me`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+
+      if (res.ok) {
+        toast.success("Đã kích hoạt quét dữ liệu!", {
+          description: "Hệ thống đang chạy ngầm, vui lòng đợi kết quả."
+        });
+        const now = Date.now();
+        localStorage.setItem(STORAGE_KEY, now.toString());
+        setCooldown(COOLDOWN_TIME); 
+      } else {
+        const err = await res.json();
+        if (res.status === 429) {
+            toast.warning("Thao tác quá nhanh", { description: err.detail });
+        } else {
+            toast.error("Lỗi", { description: err.detail });
+        }
+      }
+    } catch (e) {
+      toast.error("Lỗi kết nối Server");
+    } finally {
+      setIsCollecting(false);
+    }
+  };
+
+  // --- API CẬP NHẬT CẤU HÌNH ---
   const updateSettingsMutation = useMutation({
     mutationFn: async (data: any) => {
       const token = localStorage.getItem('auth_token');
@@ -69,7 +152,6 @@ const Settings = () => {
         },
         body: JSON.stringify(data)
       });
-      
       if (!res.ok) {
         const errData = await res.json();
         throw new Error(errData.detail || 'Cập nhật thất bại');
@@ -84,7 +166,6 @@ const Settings = () => {
   });
 
   const handleSaveSettings = () => {
-    // Gửi đầy đủ 3 trường mà Backend yêu cầu
     updateSettingsMutation.mutate({
       brand_name: formData.brand_name,
       keywords: formData.keywords,
@@ -92,11 +173,11 @@ const Settings = () => {
     });
   };
 
-  // 4. API ĐỔI MẬT KHẨU
+  // --- API ĐỔI MẬT KHẨU ---
   const changePasswordMutation = useMutation({
     mutationFn: async () => {
       const token = localStorage.getItem('auth_token');
-      const res = await fetch(`${API_URL}/api/users/change-password`, {
+      const res = await fetch(`${API_URL}/api/change-password`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -107,7 +188,6 @@ const Settings = () => {
           new_password: passwordData.newPassword
         })
       });
-
       if (!res.ok) {
         const err = await res.json();
         throw new Error(err.detail || 'Đổi mật khẩu thất bại');
@@ -156,6 +236,40 @@ const Settings = () => {
 
         {/* TAB CẤU HÌNH CHUNG */}
         <TabsContent value="general" className="space-y-4 mt-6">
+          
+          {/* --- CARD 1: CẬP NHẬT DỮ LIỆU (Đã đồng bộ giao diện) --- */}
+          <Card>
+            <CardHeader className="pb-3">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <div>
+                        <CardTitle className="flex items-center gap-2">
+                            <RefreshCcw className="h-5 w-5" /> Cập nhật dữ liệu
+                        </CardTitle>
+                        <CardDescription>
+                            Kích hoạt robot quét dữ liệu thủ công (Giới hạn 1 lần/giờ).
+                        </CardDescription>
+                    </div>
+                    
+                    {/* Nút bấm đặt bên phải cho gọn */}
+                    <Button 
+                        onClick={handleTriggerCollect} 
+                        disabled={isCollecting || cooldown > 0}
+                        variant={cooldown > 0 ? "outline" : "default"} // Đổi style nút khi chờ
+                        className={cooldown > 0 ? "border-dashed" : ""}
+                    >
+                        {isCollecting ? (
+                            <><Loader2 className="mr-2 h-4 w-4 animate-spin"/> Đang xử lý...</>
+                        ) : cooldown > 0 ? (
+                            <><Clock className="mr-2 h-4 w-4 text-orange-500"/> Chờ {formatTime(cooldown)}</>
+                        ) : (
+                            <><RefreshCcw className="mr-2 h-4 w-4"/> Quét ngay</>
+                        )}
+                    </Button>
+                </div>
+            </CardHeader>
+          </Card>
+
+          {/* --- CARD 2: CẤU HÌNH THEO DÕI --- */}
           <Card>
             <CardHeader>
               <CardTitle>Cấu hình Theo dõi</CardTitle>
@@ -163,9 +277,8 @@ const Settings = () => {
             </CardHeader>
             <CardContent className="space-y-6">
               
-              {/* PHẦN SWITCH NGUỒN TIN (QUAN TRỌNG) */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="flex items-center justify-between p-4 rounded-lg border bg-secondary/20">
+                <div className="flex items-center justify-between p-4 rounded-lg border bg-secondary/10 hover:bg-secondary/20 transition-colors">
                     <div className="flex items-center gap-3">
                         <Youtube className="h-5 w-5 text-red-600" />
                         <span className="font-medium">YouTube</span>
@@ -178,7 +291,7 @@ const Settings = () => {
                         })}
                     />
                 </div>
-                <div className="flex items-center justify-between p-4 rounded-lg border bg-secondary/20">
+                <div className="flex items-center justify-between p-4 rounded-lg border bg-secondary/10 hover:bg-secondary/20 transition-colors">
                     <div className="flex items-center gap-3">
                         <Newspaper className="h-5 w-5 text-blue-600" />
                         <span className="font-medium">Báo chí (News)</span>
@@ -209,14 +322,14 @@ const Settings = () => {
               <div className="space-y-2">
                 <Label>Từ khóa liên quan</Label>
                 <Textarea 
-                  className="min-h-[100px]"
+                  className="min-h-[100px] font-mono text-sm"
                   value={formData.keywords}
                   onChange={(e) => setFormData({...formData, keywords: e.target.value})}
                   placeholder="ngăn cách bằng dấu phẩy: vf8, xe điện, pin..."
                 />
               </div>
 
-              <div className="flex justify-end pt-4">
+              <div className="flex justify-end pt-2">
                 <Button onClick={handleSaveSettings} disabled={updateSettingsMutation.isPending}>
                   {updateSettingsMutation.isPending ? <Loader2 className="animate-spin mr-2"/> : <Save className="mr-2"/>}
                   Lưu cấu hình
@@ -276,7 +389,8 @@ const Settings = () => {
                         />
                     </div>
                     <Button onClick={handleChangePassword} disabled={changePasswordMutation.isPending} className="mt-2">
-                         {changePasswordMutation.isPending ? 'Đang xử lý...' : 'Cập nhật mật khẩu'}
+                         {changePasswordMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin"/> : null} 
+                         Cập nhật mật khẩu
                     </Button>
                 </div>
               </div>

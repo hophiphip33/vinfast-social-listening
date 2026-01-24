@@ -392,8 +392,15 @@ async def search_and_collect_videos(keywords: List[str] = None, brand_name: str 
     
     now = datetime.now()
     
-    # Tạo Query Search từ 5 từ khóa đầu tiên của User
-    query = " | ".join(keywords[:5])
+    # Tạo Query Search từ 7 từ khóa đầu tiên của User
+    hashtag_keywords = []
+    for k in keywords[:7]:
+        k = k.strip()
+        if not k.startswith("#"):
+            k = f"#{k}"
+        hashtag_keywords.append(k)
+    
+    query = " | ".join(hashtag_keywords)
     logger.info(f"🚀 Tìm kiếm Video cho Brand: {brand_name} | Query: {query}")
     
     ydl_search_opts = {

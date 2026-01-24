@@ -82,7 +82,7 @@ app.add_middleware(
 
 # Khởi tạo AI Model & Gemini
 sentiment_model = CustomSentimentModel()
-genai.configure(api_key=settings.GEMINI_API_KEYS[0] if settings.GEMINI_API_KEYS else "")
+genai.configure(api_key=settings.GEMINI_API_KEYS[0])
 gemini_model = genai.GenerativeModel(settings.GEMINI_MODEL)
 
 # ==============================================================================
@@ -153,9 +153,32 @@ def get_youtube_transcript(video_id):
     except Exception:
         return ""
 
-def gemini_summarize(text, max_words=300):
-    """Dùng Gemini để tóm tắt nội dung dài"""
+# [SỬA] Chuyển thành async để có thể gọi DB
+async def gemini_summarize(text, max_words=300):
+    """Dùng Gemini để tóm tắt nội dung dài (Lấy Key Dynamic từ DB)"""
     try:
+        # 1. Lấy cấu hình từ Database (system_config)
+        config = await db_manager.database["system_config"].find_one()
+        api_key = None
+
+        # Ưu tiên lấy key đầu tiên trong danh sách key của DB
+        if config and config.get("api_keys") and len(config["api_keys"]) > 0:
+            api_key = config["api_keys"][0]
+
+        # 2. Fallback: Nếu DB không có, mới lấy từ Settings (.env)
+        if not api_key:
+            api_key = settings.GEMINI_API_KEYS[0] if settings.GEMINI_API_KEYS else ""
+
+        if not api_key:
+            print("Gemini Error: Missing API Key")
+            return text[:500] + "..." # Trả về text gốc cắt ngắn nếu không có key
+
+        # 3. Cấu hình lại GenAI với key vừa lấy
+        genai.configure(api_key=api_key)
+        
+        # Khởi tạo model (nên khởi tạo lại để đảm bảo ăn key mới)
+        model = genai.GenerativeModel(settings.GEMINI_MODEL)
+
         prompt = f"""Hãy tóm tắt nội dung văn bản sau đây thành khoảng {max_words} từ bằng Tiếng Việt. 
         Tập trung vào các ý chính, quan điểm và thái độ của bài viết/video.
         
@@ -163,8 +186,11 @@ def gemini_summarize(text, max_words=300):
         {text[:10000]} # Giới hạn token
         
         Tóm tắt:"""
-        response = gemini_model.generate_content(prompt)
+
+        # 4. Gọi hàm tạo nội dung (Dùng generate_content_async cho chuẩn FastAPI)
+        response = await model.generate_content_async(prompt)
         return response.text
+
     except Exception as e:
         print(f"Gemini Error: {e}")
         return text[:500] + "..." # Fallback nếu lỗi AI
@@ -682,7 +708,7 @@ async def analyze_url(req: AnalyzeRequest, current_user: dict = Depends(get_curr
         raise HTTPException(status_code=400, detail="Nội dung quá ngắn.")
 
     # Phân tích AI
-    summary = gemini_summarize(full_content)
+    summary = await gemini_summarize(full_content)
     sentiment_score = sentiment_model.predict(summary)
     
     sentiment_label = "NEUTRAL"
@@ -724,7 +750,42 @@ async def analyze_url(req: AnalyzeRequest, current_user: dict = Depends(get_curr
         "marketing_score": round(float(marketing_score), 1),
         "has_keyword": has_keyword, "matched_keyword": matched_keyword, "saved": has_keyword
     }
+# [THÊM VÀO] backend/api/main.py
 
+@app.post("/api/collect/me")
+async def trigger_user_collection(
+    background_tasks: BackgroundTasks, 
+    current_user: dict = Depends(get_current_user)
+):
+    """Cho phép User tự kích hoạt thu thập dữ liệu cho riêng mình"""
+    
+    # 1. Kiểm tra xem Collector có sẵn sàng không
+    if not collect_data_for_user:
+        raise HTTPException(status_code=503, detail="Hệ thống thu thập chưa được cấu hình")
+
+    # 2. Lấy từ khóa của User
+    user_keywords = current_user.get("keywords", [])
+    brand_name = current_user.get("brand_name", "")
+    active_sources = current_user.get("active_sources", {"youtube": True, "news": True})
+
+    if not user_keywords or not brand_name:
+        raise HTTPException(status_code=400, detail="Bạn chưa cấu hình Từ khóa hoặc Tên thương hiệu")
+
+    # 3. Chạy ngầm (Background Task) để không treo giao diện
+    background_tasks.add_task(
+        collect_data_for_user,
+        keywords=user_keywords,
+        brand_name=brand_name,
+        active_sources=active_sources,
+        user_id=str(current_user["_id"]),
+        user_email=current_user["email"]
+    )
+    
+    # 4. Ghi log
+    if log_activity:
+        await log_activity("INFO", current_user["email"], "MANUAL_CRAWL", "User tự kích hoạt thu thập")
+
+    return {"message": "Hệ thống đang thu thập dữ liệu cho bạn. Vui lòng đợi vài phút."}
 @app.get("/api/posts/moderation")
 async def get_posts_for_moderation(
     page: int = 1, limit: int = 20, platform: str = "all", 
