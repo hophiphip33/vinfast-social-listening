@@ -281,7 +281,33 @@ async def shutdown_db_client():
 # ==============================================================================
 # 5. AUTHENTICATION API (ĐĂNG NHẬP / QUÊN MẬT KHẨU)
 # ==============================================================================
+@app.put("/api/users/settings")
+async def update_user_settings(settings_data: UserSettingsUpdate, current_user: dict = Depends(get_current_user)):
+    """[User] Cập nhật cài đặt cá nhân"""
+    raw_keywords = settings_data.keywords
+    keywords_list = []
 
+    # Kiểm tra: Nếu là chuỗi thì split, nếu là list thì dùng luôn
+    if isinstance(raw_keywords, str):
+        keywords_list = [k.strip() for k in raw_keywords.split(",") if k.strip()]
+    elif isinstance(raw_keywords, list):
+        keywords_list = raw_keywords
+    
+    update_data = {
+        "brand_name": settings_data.brand_name,
+        "keywords": keywords_list,
+        "active_sources": settings_data.active_sources,
+        "updated_at": datetime.now()
+    }
+    
+    await db_manager.database["users"].update_one(
+        {"email": current_user["email"]},
+        {"$set": update_data}
+    )
+    if log_activity:
+        log_msg = f"Đổi Brand: {settings_data.brand_name} | Keywords: {len(keywords_list)} từ"
+        await log_activity("INFO", current_user["email"], "UPDATE_SETTINGS", log_msg)
+    return {"message": "Cập nhật thành công", "data": update_data}
 @app.post("/token", response_model=TokenResponse)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
     """API Đăng nhập lấy Token"""
@@ -479,27 +505,7 @@ async def read_users_me(current_user: dict = Depends(get_current_user)):
         "active_sources": current_user.get("active_sources", {"youtube": True, "news": True})
     }
 
-@app.put("/api/users/settings")
-async def update_user_settings(settings_data: UserSettingsUpdate, current_user: dict = Depends(get_current_user)):
-    """[User] Cập nhật cài đặt cá nhân"""
-    raw_keywords = settings_data.keywords
-    keywords_list = [k.strip() for k in raw_keywords.split(",") if k.strip()]
-    
-    update_data = {
-        "brand_name": settings_data.brand_name,
-        "keywords": keywords_list,
-        "active_sources": settings_data.active_sources,
-        "updated_at": datetime.now()
-    }
-    
-    await db_manager.database["users"].update_one(
-        {"email": current_user["email"]},
-        {"$set": update_data}
-    )
-    if log_activity:
-        log_msg = f"Đổi Brand: {settings_data.brand_name} | Keywords: {len(keywords_list)} từ"
-        await log_activity("INFO", current_user["email"], "UPDATE_SETTINGS", log_msg)
-    return {"message": "Cập nhật thành công", "data": update_data}
+
 
 @app.post("/api/change-password")
 async def change_password(
@@ -941,9 +947,7 @@ async def remove_keyword(keyword: str, current_user: dict = Depends(get_current_
         {"$pull": {"keywords": keyword}}
     )
     return {"message": f"Đã xóa từ khóa: {keyword}"}
-# backend/api/main.py
 
-# ... (các import hiện có)
 
 @app.delete("/api/posts/{post_id}")
 async def delete_post(post_id: str, current_user: dict = Depends(get_current_user)):

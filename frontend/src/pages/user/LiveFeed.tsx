@@ -23,7 +23,7 @@ import { vi } from 'date-fns/locale';
 import { useToast } from '@/components/ui/use-toast'; // [THÊM] Import useToast
 
 // --- CẤU HÌNH API ---
-const API_URL = 'http://localhost:8000';
+const API_URL = 'http://127.0.0.1:8000';
 const ITEMS_PER_PAGE = 20; // Số bài mỗi trang
 
 interface PostData {

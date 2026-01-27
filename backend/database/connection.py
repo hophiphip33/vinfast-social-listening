@@ -120,7 +120,6 @@ class DatabaseManager:
 db_manager = DatabaseManager()
 
 
-# --- GIỮ NGUYÊN CLASS CŨ CỦA BẠN ---
 class DatabaseOperations:
     """Database operations for the application"""
     

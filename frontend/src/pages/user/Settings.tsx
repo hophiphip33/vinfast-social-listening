@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 
 // Sử dụng biến môi trường nếu có, không thì fallback về localhost
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
 
 // Cấu hình thời gian chờ: 1 giờ = 3600 giây
 const COOLDOWN_TIME = 3600; 
@@ -152,9 +152,24 @@ const Settings = () => {
         },
         body: JSON.stringify(data)
       });
+      
       if (!res.ok) {
         const errData = await res.json();
-        throw new Error(errData.detail || 'Cập nhật thất bại');
+        // --- XỬ LÝ LỖI THÔNG MINH ĐỂ TRÁNH [object Object] ---
+        let errorMessage = 'Cập nhật thất bại';
+        
+        if (Array.isArray(errData.detail)) {
+            // Nếu lỗi là mảng (Pydantic validation error)
+            errorMessage = errData.detail.map((e: any) => `${e.loc.join('.')} - ${e.msg}`).join(', ');
+        } else if (typeof errData.detail === 'string') {
+            // Nếu lỗi là chuỗi thông thường
+            errorMessage = errData.detail;
+        } else if (errData.detail) {
+            // Nếu là object khác
+            errorMessage = JSON.stringify(errData.detail);
+        }
+        
+        throw new Error(errorMessage);
       }
       return await res.json();
     },
@@ -166,12 +181,24 @@ const Settings = () => {
   });
 
   const handleSaveSettings = () => {
-    updateSettingsMutation.mutate({
-      brand_name: formData.brand_name,
-      keywords: formData.keywords,
-      active_sources: formData.active_sources 
-    });
-  };
+  // Chuyển keywords từ string thành array trước khi gửi
+  let keywordsArray: string[] = [];
+  
+  if (typeof formData.keywords === 'string') {
+    keywordsArray = formData.keywords
+      .split(',')
+      .map(k => k.trim())
+      .filter(k => k.length > 0);
+  } else if (Array.isArray(formData.keywords)) {
+    keywordsArray = formData.keywords;
+  }
+
+  updateSettingsMutation.mutate({
+    brand_name: formData.brand_name || '',
+    keywords: keywordsArray,  // ← Gửi dạng array
+    active_sources: formData.active_sources || { youtube: true, news: true }
+  });
+};
 
   // --- API ĐỔI MẬT KHẨU ---
   const changePasswordMutation = useMutation({
@@ -237,7 +264,7 @@ const Settings = () => {
         {/* TAB CẤU HÌNH CHUNG */}
         <TabsContent value="general" className="space-y-4 mt-6">
           
-          {/* --- CARD 1: CẬP NHẬT DỮ LIỆU (Đã đồng bộ giao diện) --- */}
+          {/* --- CARD 1: CẬP NHẬT DỮ LIỆU --- */}
           <Card>
             <CardHeader className="pb-3">
                 <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -250,11 +277,10 @@ const Settings = () => {
                         </CardDescription>
                     </div>
                     
-                    {/* Nút bấm đặt bên phải cho gọn */}
                     <Button 
                         onClick={handleTriggerCollect} 
                         disabled={isCollecting || cooldown > 0}
-                        variant={cooldown > 0 ? "outline" : "default"} // Đổi style nút khi chờ
+                        variant={cooldown > 0 ? "outline" : "default"}
                         className={cooldown > 0 ? "border-dashed" : ""}
                     >
                         {isCollecting ? (

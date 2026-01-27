@@ -82,21 +82,7 @@ class TaskScheduler:
             logger.info("🛑 Scheduler service stopped")
     # backend/tasks/scheduler.py
 
-async def scheduled_crawl():
-    # 1. Lấy danh sách user từ DB
-    users = await db_manager.database["users"].find({"is_active": True}).to_list(None)
-    
-    for user in users:
-        # --- ĐOẠN CẦN BỔ SUNG ---
-        # Lấy cấu hình active_sources từ DB (Nếu không có thì mặc định True hết)
-        user_sources = user.get("active_sources", {"youtube": True, "news": True})
-        
-        # Truyền user_sources vào hàm thu thập
-        await collect_data_for_user(
-            keywords=user.get("keywords", []),
-            brand_name=user.get("brand_name"),
-            active_sources=user_sources # <--- BẠN PHẢI TRUYỀN THAM SỐ NÀY
-        )
+
 async def scheduled_crawl():
     users = await db_manager.database["users"].find({"is_active": True}).to_list(None)
     for user in users:

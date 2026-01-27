@@ -1,9 +1,9 @@
 """
-Pydantic schemas for VinFast Social Listening Platform API
+Pydantic schemas for Social Listening Platform API
 Request and response models for API endpoints
 """
 
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
 from pydantic import BaseModel, Field
 
@@ -34,7 +34,7 @@ class AnalyticsRequest(BaseModel):
 class UserSettingsUpdate(BaseModel):
     """Request schema for updating user settings"""
     brand_name: str
-    keywords: str
+    keywords: List[str]
     active_sources: Dict[str, bool] # Ví dụ: {"youtube": false, "news": true}
 
 # Response Schemas

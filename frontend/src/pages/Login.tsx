@@ -19,7 +19,7 @@ import { toast } from 'sonner';
 // Import logo trực tiếp
 import logoVeda from '@/assets/logo2.png'; 
 
-const API_URL = 'http://localhost:8000';
+const API_URL = 'http://127.0.0.1:8000';
 
 const Login = () => {
   const navigate = useNavigate();
